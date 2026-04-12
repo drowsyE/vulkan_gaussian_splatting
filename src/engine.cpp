@@ -1,7 +1,7 @@
 // #define NDEBUG
 
-#include "renderer.h"
-#include "renderer_utils.h"
+#include "engine.h"
+#include "engine_utils.h"
 #include "gs_core.h"
 
 #include <iostream>
@@ -34,13 +34,83 @@ std::vector<const char*> deviceExtensions {
 #endif
 };
 
-void Renderer::run(bool train) {
-
-    // train here
+void Engine::run() {
 
     while (!glfwWindowShouldClose(pWindow)) {
+
+        VkCommandBuffer cmdbuf = commandBuffers[currentFrame];
+
+        // Pass 1
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vkBeginCommandBuffer(cmdbuf, &beginInfo);
+
+        // 매 프레임 카운터를 0으로 덮어씀
+        vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
+
+        // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
+        VkMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdbuf,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
+
+        vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
+
+        VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
+        vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+
+        vkCmdDispatch(cmdbuf, ceil(render_width / 256), 1, 1);
+
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmdbuf,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_HOST_BIT,
+                            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        vkEndCommandBuffer(cmdbuf);
+        
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.pCommandBuffers = &cmdbuf;
+        submitInfo.commandBufferCount = 1;
+        vkQueueSubmit(computeQueue, 1, &submitInfo, projFinshedFences[currentFrame]);
+
+        vkWaitForFences(device, 1, &projFinshedFences[currentFrame], VK_TRUE, UINT64_MAX); // GPU가 다 끝날 때까지 대기
+        vkResetFences(device, 1, &projFinshedFences[currentFrame]);
+
+        // Pass 2
+        uint32_t num_keys = *(int*)pCounter;
+        vkBeginCommandBuffer(cmdbuf, &beginInfo);
+        vrdxCmdSortKeyValue(cmdbuf, sorter, num_keys, keyBuffer, 0, valueBuffer, 0, pingpongBuffer, 0, VK_NULL_HANDLE, 0);
+
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdbuf,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipeline);
+        vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1, &globalDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf, ceil(num_keys / 256), 0, 0);
+
+        vkEndCommandBuffer(cmdbuf);
+
+        vkQueueSubmit(computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        
+        
+
         glfwPollEvents();
         drawFrame();
+
+
+        currentFrame = (currentFrame + 1) % MAX_FRAME_IN_FLIGHT;
     }
 }
 
@@ -48,12 +118,12 @@ void Renderer::run(bool train) {
 
 // }
 
-void Renderer::drawFrame() {
-
-    currentFrame = (currentFrame + 1) % MAX_FRAME_IN_FLIGHT;
+void Engine::drawFrame() {
+   
 }
-Renderer::Renderer(){};
-Renderer::Renderer(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points) {
+
+Engine::Engine(){};
+Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points) {
 
     initWindow();
     createInstance();
@@ -62,7 +132,6 @@ Renderer::Renderer(uint64_t src_width, uint64_t src_height, float scale, std::ve
     pickPhysicalDevice();
     createLogicalDevice();  
     createSwapchain();
-    printf("Number of swapchain images : %ld\n", swapchainImages.size());
     createSwapchainImageViews();
     createCommandPool();
     createCommandBuffers();
@@ -71,13 +140,16 @@ Renderer::Renderer(uint64_t src_width, uint64_t src_height, float scale, std::ve
     render_width = src_width * scale;
     render_height = src_height * scale;
     totalGaussians = points.size();
-    gaussBufferCapacity = totalGaussians * 2;
-    std::vector<Gaussian> src_tmp = gaussianFromPoints(points, totalGaussians, gaussBufferCapacity);
-    ProjectedGaussian pg;
-    std::vector<ProjectedGaussian> src_tmp1(gaussBufferCapacity, pg);
+    gaussBufferCapacity = totalGaussians << 2;
+    std::vector<Gaussian3D> src_tmp = gaussianFromPoints(points, totalGaussians, gaussBufferCapacity);
     
-    createStorageBuffer<Gaussian>(src_tmp, gaussianBuffer, gaussianBufferMemory);
-    createStorageBuffer<ProjectedGaussian>(src_tmp1, projectedGaussianBuffer, projectedGaussianBufferMemory);
+    createStorageBuffer<Gaussian3D>(src_tmp, gaussianBuffer, gaussianBufferMemory);
+    createStorageBuffer<Gaussian2D>(gaussBufferCapacity, projectedGaussianBuffer, projectedGaussianBufferMemory);
+    
+    int n_tiles_row = (render_height + 15) >> 4;
+    int n_tiles_col = (render_width + 15) >> 4;
+    num_tiles = n_tiles_row*n_tiles_row;
+    createStorageBuffer<TileRange>(num_tiles, tileRangeBuffer, tileRangeBufferMemory);
 
     cameraBuffers.resize(MAX_FRAME_IN_FLIGHT);
     cameraBufferMemory.resize(MAX_FRAME_IN_FLIGHT);
@@ -97,8 +169,7 @@ Renderer::Renderer(uint64_t src_width, uint64_t src_height, float scale, std::ve
     createSorterAndBuffer();
     createDescriptorSetLayouts();
     createDescriptorPool();
-    createDescriptorSets(gaussBufferCapacity);
-
+    createDescriptorSets();
 
     VkPushConstantRange push{};
     push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -106,11 +177,11 @@ Renderer::Renderer(uint64_t src_width, uint64_t src_height, float scale, std::ve
     push.size = sizeof(int);
     std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
     createComputePipeline(projComputePipeline, projComputePipelineLayout, "../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
-
+    createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 0, nullptr, 1, &globalDescriptorSetLayout);
     // createRenderpass();
 }
 
-Renderer::~Renderer() {
+Engine::~Engine() {
     // vkDestroyRenderPass(device, renderpass, nullptr);
     vkDestroyPipelineLayout(device, projComputePipelineLayout, nullptr);
     vkDestroyPipeline(device, projComputePipeline, nullptr);
@@ -118,6 +189,7 @@ Renderer::~Renderer() {
     vkDestroyDescriptorSetLayout(device, localDescriptorSetLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
 
+    vrdxDestroySorter(sorter);
     vkDestroyBuffer(device, keyBuffer, nullptr);
     vkFreeMemory(device, keyBufferMemory, nullptr);
     vkDestroyBuffer(device, valueBuffer, nullptr);
@@ -153,13 +225,13 @@ Renderer::~Renderer() {
     glfwTerminate();
 }
 
-void Renderer::initWindow() {
+void Engine::initWindow() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     pWindow = glfwCreateWindow(DEFAULT_WIDTH, DEFAULT_HEIGHT, "3DGS", nullptr, nullptr);
 }
 
-void Renderer::createInstance() {
+void Engine::createInstance() {
 
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -168,7 +240,7 @@ void Renderer::createInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "no engine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_0;
+    appInfo.apiVersion = VK_API_VERSION_1_4;
 
     uint32_t extCount;
     const char** ext = glfwGetRequiredInstanceExtensions(&extCount);
@@ -209,7 +281,7 @@ void Renderer::createInstance() {
     vkCreateInstance(&instanceInfo, nullptr, &instance);
 }
 
-void Renderer::setupDebugMessenger() {
+void Engine::setupDebugMessenger() {
     if (!enableValidationLayers)
         return;
 
@@ -219,7 +291,7 @@ void Renderer::setupDebugMessenger() {
     createDebugUtilsMessenger(instance, &createInfo, nullptr, &debugMessenger);
 }
 
-void Renderer::pickPhysicalDevice() {
+void Engine::pickPhysicalDevice() {
 
     uint32_t n_physDev;
     vkEnumeratePhysicalDevices(instance, &n_physDev, nullptr);
@@ -262,7 +334,7 @@ void Renderer::pickPhysicalDevice() {
     throw std::runtime_error("Failed to find compatible physical device!\n");
 }
 
-void Renderer::createLogicalDevice() {
+void Engine::createLogicalDevice() {
 
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
     float priorities = 1.0f;
@@ -310,7 +382,7 @@ void Renderer::createLogicalDevice() {
     vkGetDeviceQueue(device, presentFamilyIndex, 0, &presentQueue);
 }
 
-void Renderer::createSwapchain() {
+void Engine::createSwapchain() {
     VkSurfaceCapabilitiesKHR surfaceCaps;    
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physDev, surface, &surfaceCaps);
 
@@ -392,7 +464,7 @@ void Renderer::createSwapchain() {
     vkGetSwapchainImagesKHR(device, swapchain, &minImageCount, swapchainImages.data());
 }
 
-void Renderer::createSwapchainImageViews() {
+void Engine::createSwapchainImageViews() {
     swapchainImageViews.resize(swapchainImages.size());
     
     VkImageViewCreateInfo viewInfo{};
@@ -419,7 +491,7 @@ void Renderer::createSwapchainImageViews() {
     }
 }
 
-void Renderer::createRenderpass() {
+void Engine::createRenderpass() {
 
     VkAttachmentDescription colorAtt{};
     colorAtt.format = swapchainImageFormat;
@@ -460,7 +532,7 @@ void Renderer::createRenderpass() {
     vkCreateRenderPass(device, &renderInfo, nullptr, &renderpass);
 }
 
-void Renderer::createCommandPool() {
+void Engine::createCommandPool() {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -469,7 +541,7 @@ void Renderer::createCommandPool() {
     vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
 }
 
-void Renderer::createCommandBuffers() {
+void Engine::createCommandBuffers() {
     commandBuffers.resize(MAX_FRAME_IN_FLIGHT);
 
     VkCommandBufferAllocateInfo allocInfo{};
@@ -480,28 +552,46 @@ void Renderer::createCommandBuffers() {
     vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data());
 }
 
-void Renderer::createSorterAndBuffer() {
-    totalKVCount = gaussBufferCapacity * 64; // static pre-allocation pool
+void Engine::createSorterAndBuffer() {
+    VrdxSorterCreateInfo sorterInfo{
+        .device = device,
+        .physicalDevice = physDev,
+        .pipelineCache = VK_NULL_HANDLE
+    };
+    vrdxCreateSorter(&sorterInfo, &sorter);
+    
+    KVCapacity = gaussBufferCapacity * 32; // static pre-allocation pool
 
-    VkDeviceSize keyBufferSize = totalKVCount * sizeof(uint64_t);
-    VkDeviceSize valueBufferSize = totalKVCount * sizeof(uint32_t);
+    // VkDeviceSize keyBufferSize = totalKVCount * sizeof(uint64_t);
+    // VkDeviceSize valueBufferSize = totalKVCount * sizeof(uint32_t);
     VkDeviceSize counterBufferSize = sizeof(uint32_t);
 
-    createBuffer(keyBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, keyBuffer, keyBufferMemory);
-    createBuffer(valueBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, valueBuffer, valueBufferMemory);
-    
+    VrdxSorterStorageRequirements reqs;
+    vrdxGetSorterKeyValueStorageRequirements(sorter, KVCapacity, &reqs);
+
+    createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, keyBuffer, keyBufferMemory);
+    createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, valueBuffer, valueBufferMemory);
+    createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pingpongBuffer, pingpongBufferMemory);
     // counterBuffer needs TRANSFER_DST to be reset every frame
-    createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, counterBuffer, counterBufferMemory);
+    createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, counterBuffer, counterBufferMemory);
+    vkMapMemory(device, counterBufferMemory, 0, counterBufferSize, 0, &pCounter);
 }
 
-void Renderer::createSyncObjects() {
-    // W.I.P
+void Engine::createSyncObjects() {
+    projFinshedFences.resize(MAX_FRAME_IN_FLIGHT);
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    // fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
+        vkCreateFence(device, &fenceInfo, nullptr, &projFinshedFences[i]);
+    }
 }
 
-void Renderer::createDescriptorSetLayouts() {
+void Engine::createDescriptorSetLayouts() {
 
     // 1. global descriptor
-    std::array<VkDescriptorSetLayoutBinding, 5> globalBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 6> globalBindings{};
     globalBindings[0].binding = 0;
     globalBindings[0].descriptorCount = 1;
     globalBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -532,6 +622,12 @@ void Renderer::createDescriptorSetLayouts() {
     globalBindings[4].pImmutableSamplers = nullptr;
     globalBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    globalBindings[5].binding = 5; // Counter
+    globalBindings[5].descriptorCount = 1;
+    globalBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    globalBindings[5].pImmutableSamplers = nullptr;
+    globalBindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
     setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     setLayoutInfo.bindingCount = globalBindings.size();
@@ -559,12 +655,12 @@ void Renderer::createDescriptorSetLayouts() {
     vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &localDescriptorSetLayout);
 }
 
-void Renderer::createDescriptorPool() {
+void Engine::createDescriptorPool() {
 
     std::array<VkDescriptorPoolSize, 3> poolSizes;
     poolSizes[0] = {
         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 5
+        .descriptorCount = 6
     };
     poolSizes[1] = {
         .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -583,7 +679,7 @@ void Renderer::createDescriptorPool() {
     vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
 }
 
-void Renderer::createDescriptorSets(uint64_t n_gaussians) {
+void Engine::createDescriptorSets() {
 
     // printf("DEBUG | global descriptor set layout : %p\n", (void*)globalDescriptorSetLayout);
     // printf("DEBUG | local descriptor set layout : %p\n", (void*)localDescriptorSetLayout);
@@ -599,29 +695,34 @@ void Renderer::createDescriptorSets(uint64_t n_gaussians) {
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = gaussianBuffer;
     bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(Gaussian) * gaussBufferCapacity; 
+    bufferInfo.range = sizeof(Gaussian3D) * gaussBufferCapacity; 
 
     VkDescriptorBufferInfo bufferInfo1{};
     bufferInfo1.buffer = projectedGaussianBuffer;
     bufferInfo1.offset = 0;
-    bufferInfo1.range = sizeof(ProjectedGaussian) * gaussBufferCapacity; 
+    bufferInfo1.range = sizeof(Gaussian2D) * gaussBufferCapacity; 
 
     VkDescriptorBufferInfo bufferInfo2{};
     bufferInfo2.buffer = keyBuffer;
     bufferInfo2.offset = 0;
-    bufferInfo2.range = sizeof(uint64_t) * totalKVCount;
+    bufferInfo2.range = sizeof(uint64_t) * KVCapacity;
 
     VkDescriptorBufferInfo bufferInfo3{};
     bufferInfo3.buffer = valueBuffer;
     bufferInfo3.offset = 0;
-    bufferInfo3.range = sizeof(uint32_t) * totalKVCount;
+    bufferInfo3.range = sizeof(uint32_t) * KVCapacity;
 
     VkDescriptorBufferInfo bufferInfo4{};
     bufferInfo4.buffer = counterBuffer;
     bufferInfo4.offset = 0;
     bufferInfo4.range = sizeof(uint32_t);
 
-    std::array<VkWriteDescriptorSet, 5> descriptorWriteGlobal{};
+    VkDescriptorBufferInfo bufferInfo5{};
+    bufferInfo4.buffer = tileRangeBuffer;
+    bufferInfo4.offset = 0;
+    bufferInfo4.range = sizeof(TileRange) * num_tiles;
+
+    std::array<VkWriteDescriptorSet, 6> descriptorWriteGlobal{};
     descriptorWriteGlobal[0] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .pNext = nullptr,
@@ -686,6 +787,20 @@ void Renderer::createDescriptorSets(uint64_t n_gaussians) {
         .pBufferInfo = &bufferInfo4,
         .pTexelBufferView = nullptr
     };
+
+    descriptorWriteGlobal[5] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = nullptr,
+        .dstSet = globalDescriptorSets,
+        .dstBinding = 5,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pImageInfo = nullptr,
+        .pBufferInfo = &bufferInfo5,
+        .pTexelBufferView = nullptr
+    };
+
     vkUpdateDescriptorSets(device, descriptorWriteGlobal.size(), descriptorWriteGlobal.data(), 0, nullptr);
 
     // 2. local descriptor set
@@ -740,7 +855,7 @@ void Renderer::createDescriptorSets(uint64_t n_gaussians) {
     }
 }
 
-void Renderer::createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pipelineLayout,
+void Engine::createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pipelineLayout,
                                      const char* shaderPath,
                                      uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges,
                                      uint32_t setLayoutCount, VkDescriptorSetLayout* pSetLayouts) {
@@ -803,7 +918,7 @@ void Renderer::createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pip
 //     vkDestroyShaderModule(device, renderShaderModule, nullptr);
 // }
 
-uint32_t Renderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+uint32_t Engine::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(physDev, &memProps);
 
@@ -815,7 +930,7 @@ uint32_t Renderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags pro
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-void Renderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+void Engine::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                             VkMemoryPropertyFlags properties,
                             VkBuffer &buffer, VkDeviceMemory &bufferMemory) {
 
@@ -838,7 +953,7 @@ void Renderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     vkBindBufferMemory(device, buffer, bufferMemory, 0);
 }
 
-void Renderer::createImage(uint32_t width, uint32_t height,
+void Engine::createImage(uint32_t width, uint32_t height,
                            VkFormat imageFormat, VkImageUsageFlags imageUsage,
                            VkMemoryPropertyFlags properties,
                            VkImage &image, VkDeviceMemory &imageMemory) {
@@ -873,7 +988,7 @@ void Renderer::createImage(uint32_t width, uint32_t height,
     vkBindImageMemory(device, image, imageMemory, 0);
 }
 
-void Renderer::createImageView(VkFormat format, VkImage &image, VkImageView &imageView) {
+void Engine::createImageView(VkFormat format, VkImage &image, VkImageView &imageView) {
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = image;
@@ -896,7 +1011,7 @@ void Renderer::createImageView(VkFormat format, VkImage &image, VkImageView &ima
 }
 
 template <typename UBO>
-void Renderer::createUniformBuffer(VkBuffer &buffer,
+void Engine::createUniformBuffer(VkBuffer &buffer,
                                    VkDeviceMemory &bufferMemory,
                                    void* &pData) {
 
@@ -910,7 +1025,17 @@ void Renderer::createUniformBuffer(VkBuffer &buffer,
 }
 
 template <typename T>
-void Renderer::createStorageBuffer(std::vector<T> &srcBuffer,
+void Engine::createStorageBuffer(size_t num_elements, VkBuffer &buffer, VkDeviceMemory &bufferMemory) {
+    VkDeviceSize size = sizeof(T) * num_elements;
+
+    createBuffer(size,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 buffer, bufferMemory);
+}
+
+template <typename T>
+void Engine::createStorageBuffer(std::vector<T> &srcBuffer,
                                    VkBuffer &buffer, 
                                    VkDeviceMemory &bufferMemory) {
 
@@ -944,7 +1069,7 @@ void Renderer::createStorageBuffer(std::vector<T> &srcBuffer,
     vkFreeMemory(device, stagingBufferMemory, nullptr);
 }
 
-VkCommandBuffer Renderer::beginSingleTimeCommands() {
+VkCommandBuffer Engine::beginSingleTimeCommands() {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -962,7 +1087,7 @@ VkCommandBuffer Renderer::beginSingleTimeCommands() {
     return cmdbuf;
 }
 
-void Renderer::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
+void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkEndCommandBuffer(commandBuffer);
 
     VkSubmitInfo submitInfo{};
@@ -976,7 +1101,7 @@ void Renderer::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 };
 
-void Renderer::recordCommandbuffer(VkCommandBuffer &cmdbuf) {
+void Engine::recordCommandbuffer(VkCommandBuffer &cmdbuf) {
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1004,10 +1129,6 @@ void Renderer::recordCommandbuffer(VkCommandBuffer &cmdbuf) {
                             projComputePipelineLayout, 0,
                             2, bindDescriptorSets,  // descriptor set count, pDescriptorSets
                             0, nullptr);
-
-    // uint32_t groupX = static_cast<uint32_t> (ceil(render_width / 16));
-    // uint32_t groupY = static_cast<uint32_t> (ceil(render_height / 16));
-    // vkCmdDispatch(cmdbuf, groupX, groupY, 1);
 
     uint32_t group = static_cast<uint32_t> (ceil(render_width / 256));
     vkCmdDispatch(cmdbuf, group, 1, 1);

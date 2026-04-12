@@ -1,4 +1,4 @@
-// https://github.com/jaesung-cs/vulkan_radix_sort/blob/master/include/vk_radix_sort.h
+// from https://github.com/jaesung-cs/vulkan_radix_sort/blob/master/include/vk_radix_sort.h
 
 #ifndef VK_RADIX_SORT_H
 #define VK_RADIX_SORT_H

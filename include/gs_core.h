@@ -30,26 +30,29 @@ typedef struct Point {
     double error;
 } Point;
 
-typedef struct Gaussian {
+typedef struct Gaussian3D {
     glm::vec3 pos;
     alignas(16) glm::vec4 scaleOpacity; // scale.x, scale.y, scale.z, opacity
     glm::quat rot;
     glm::vec3 color;
-} Gaussian;
+} Gaussian3D;
 
-typedef struct ProjectedGaussian {
+typedef struct Gaussian2D { // Gaussians projected into screen plane
     glm::vec2 pos2d;
     alignas(8) glm::vec3 conics; // inverse covariance의 상삼각 성분 (3개)
     float opacity;
     glm::vec3 color;
-    bool flag;
-    uint64_t key;
-} ProjectedGaussian ;
+} Gaussian2D ;
+
+typedef struct TileRange {
+    uint32_t start;
+    uint32_t end;
+} TileRange;
 
 // structure of cameras.bin : [number of camera] -> [camera1] -> [camera2] -> ...
 std::vector<Camera> readCameras(const char *path);
 std::vector<Image> readImages(const char *path);
 std::vector<Point> readPoints(const char *path);
-std::vector<Gaussian> gaussianFromPoints(std::vector<Point>& points, size_t size, size_t capacity);
+std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point>& points, size_t size, size_t capacity);
 
 } // namespace Core

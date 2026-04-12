@@ -1,4 +1,4 @@
-#include "renderer.h"
+#include "engine.h"
 #include "gs_core.h"
 #include <cstdlib>
 
@@ -18,7 +18,7 @@ int main() {
     std::vector<Core::Image> images = Core::readImages("../sparse/0/images.bin");
     std::vector<Core::Point> points = Core::readPoints("../sparse/0/points3D.bin");
     
-    Core::Renderer(cameras[0].width, cameras[0].height, 0.5, points);
+    Core::Engine(cameras[0].width, cameras[0].height, 0.5, points);
 
 
 }

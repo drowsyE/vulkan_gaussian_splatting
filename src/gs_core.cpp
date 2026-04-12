@@ -91,13 +91,13 @@ std::vector<Point> readPoints(const char *path) {
     return points;
 }
 
-// std::vector<Gaussian> gaussianFromPoints(const char *path) {
+// std::vector<Gaussian3D> gaussianFromPoints(const char *path) {
 //     std::ifstream file(path, std::ios::binary);
 
 //     uint64_t num_points;
 //     file.read((char *)&num_points, sizeof(num_points));
 
-//     std::vector<Gaussian> gaussians;
+//     std::vector<Gaussian3D> gaussians;
 //     Point p;
 //     for (int i = 0; i < num_points; i++) {
 //         file.read((char *)&p.id, sizeof(uint64_t));
@@ -115,7 +115,7 @@ std::vector<Point> readPoints(const char *path) {
 //         // track skip
 //         file.ignore(track_len * sizeof(uint32_t) * 2); // (image_id, point2d_idx)
 
-//         Gaussian g;
+//         Gaussian3D g;
 //         g.pos = glm::vec3(p.x, p.y, p.z);
 //         g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
 //         g.scaleOpacity = glm::vec4(0.01f, 0.01f, 0.01f, 1.0f);
@@ -127,12 +127,12 @@ std::vector<Point> readPoints(const char *path) {
 //     return gaussians;
 // }
 
-std::vector<Gaussian> gaussianFromPoints(std::vector<Point> &points, size_t size, size_t capacity) {
+std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t size, size_t capacity) {
 
-    std::vector<Gaussian> gaussians(capacity);
+    std::vector<Gaussian3D> gaussians(capacity);
     for (int i = 0; i < size; i++) {
         Point p = points[i];
-        Gaussian g;
+        Gaussian3D g;
         g.pos = glm::vec3(p.x, p.y, p.z);
         g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
         g.scaleOpacity = glm::vec4(0.01f, 0.01f, 0.01f, 1.0f);

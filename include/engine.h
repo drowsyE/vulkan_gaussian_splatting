@@ -4,10 +4,11 @@
 #include <glfw/glfw3.h>
 #include <vector>
 
-#define VRDX_IMPLEMENTATION
+#define VRDX_IMPLEMENTATIONS
 #include "vk_radix_sort.h"
+
 #include "gs_core.h"
-#include "renderer_utils.h"
+#include "engine_utils.h"
 #include "camera.h"
 
 namespace Core {
@@ -19,14 +20,14 @@ typedef struct RendererInfo {
     uint64_t n_gaussians;
 } RendererInfo;
 
-class Renderer {
+class Engine {
 
 public:
-    Renderer(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points);
-    Renderer();
-    ~Renderer();
+    Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points);
+    Engine();
+    ~Engine();
 
-    void run(bool train = false);
+    void run();
 
 private:
 
@@ -54,6 +55,8 @@ private:
 
     VkRenderPass renderpass;
 
+    std::vector<VkFence> projFinshedFences;
+
     VkCommandPool commandPool;
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -62,14 +65,23 @@ private:
     VkBuffer projectedGaussianBuffer;
     VkDeviceMemory projectedGaussianBufferMemory;
 
-    uint32_t totalKVCount;
-    // VrdxSorter sorter;
+    uint32_t KVCapacity;
+    uint32_t counter;
+    VrdxSorter sorter;
     VkBuffer keyBuffer;
     VkDeviceMemory keyBufferMemory;
     VkBuffer valueBuffer;
     VkDeviceMemory valueBufferMemory;
+    VkBuffer pingpongBuffer;
+    VkDeviceMemory pingpongBufferMemory;
     VkBuffer counterBuffer;
     VkDeviceMemory counterBufferMemory;
+    void* pCounter;
+
+    uint32_t num_tiles;
+    VkBuffer tileRangeBuffer;
+    VkDeviceMemory tileRangeBufferMemory;
+
 
     CameraUBO camUBO;
     std::vector<VkBuffer> cameraBuffers; // need to be resized
@@ -89,6 +101,8 @@ private:
 
     VkPipelineLayout projComputePipelineLayout;
     VkPipeline projComputePipeline;
+    VkPipelineLayout rangeComputePipelineLayout;
+    VkPipeline rangeComputePipeline;
 
     void drawFrame();
     void train();
@@ -108,10 +122,13 @@ private:
     void createUniformBuffer(VkBuffer &buffer,
                              VkDeviceMemory &bufferMemory,
                              void* &pData);
+
     template <typename T>
-    void createStorageBuffer(std::vector<T> &srcBuffer,
-                             VkBuffer &buffer, 
-                             VkDeviceMemory &bufferMemory);
+    void createStorageBuffer(size_t num_elements, VkBuffer &buffer, VkDeviceMemory &bufferMemory);
+
+    template <typename T>
+    void createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer, VkDeviceMemory &bufferMemory);
+    
     void createImage(uint32_t width, uint32_t height,
                      VkFormat imageFormat, VkImageUsageFlags imageUsage,
                      VkMemoryPropertyFlags properties, VkImage &image,
@@ -120,7 +137,7 @@ private:
     void createSorterAndBuffer();
     void createDescriptorSetLayouts();
     void createDescriptorPool();
-    void createDescriptorSets(uint64_t);
+    void createDescriptorSets();
     void createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pipelineLayout,
                                const char* shaderPath,
                                uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges,

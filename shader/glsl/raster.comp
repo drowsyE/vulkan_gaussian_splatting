@@ -1,0 +1,37 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : enable
+
+struct Gaussian2D {
+    vec2 pos2d;
+    vec3 conics; // inverse covariance의 상삼각 성분 (3개)
+    float opacity;
+    vec3 color;
+    bool flag;
+};
+
+struct TileRange {
+    uint start;
+    uint end;
+};
+
+layout(set = 0, binding = 1) buffer readonly Gaussian2DSSBO {
+    Gaussian2D projectedGaussians[];
+};
+
+layout(set = 0, binding = 3) buffer readonly Values {
+    uint values[];
+};
+
+layout(set = 0, binding = 5) buffer TileRanges {
+    TileRange ranges[];
+};
+
+layout(set = 1, binding = 1, rgba8) uniform writeonly image2D outImage;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    
+
+
+}
