@@ -1,0 +1,28 @@
+#version 450
+
+struct Gaussian {
+    vec3 mean;         // center
+    vec4 scaleOpacity; // scale.x, scale.y, scale.z, opacity
+    vec4 rot;          // quatarnion
+    vec3 color;        // will be changed to SH coefficients soon
+}
+
+layout(set = 0, binding = 0) buffer GaussianSSBO {
+    Gaussian gaussians[]
+};
+
+layout(set = 1, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    mat4 viewProj;
+    vec4 camPos;    // 마지막 성분(w)은 패딩으로 비워둠
+    vec2 viewportSize;
+    float focalX;
+    float focalY;
+} camera;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    
+}
