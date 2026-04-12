@@ -1,5 +1,6 @@
 // #define NDEBUG
 
+#define VRDX_IMPLEMENTATION
 #include "engine.h"
 #include "engine_utils.h"
 #include "gs_core.h"
@@ -27,8 +28,9 @@ std::vector<const char*> validationLayer {
 };
 
 std::vector<const char*> deviceExtensions {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME, 
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
+    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // for vrdx
 #if __APPLE__
     "VK_KHR_portability_subset"
 #endif
@@ -178,11 +180,16 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
     createComputePipeline(projComputePipeline, projComputePipelineLayout, "../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
     createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 0, nullptr, 1, &globalDescriptorSetLayout);
+    createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout, "../shader/spv/raster.spv", 0, nullptr, setLayout.size(), setLayout.data());
     // createRenderpass();
 }
 
 Engine::~Engine() {
     // vkDestroyRenderPass(device, renderpass, nullptr);
+    vkDestroyPipelineLayout(device, rasterComputePipelineLayout, nullptr);
+    vkDestroyPipeline(device, rasterComputePipeline, nullptr);
+    vkDestroyPipelineLayout(device, rangeComputePipelineLayout, nullptr);
+    vkDestroyPipeline(device, rangeComputePipeline, nullptr);
     vkDestroyPipelineLayout(device, projComputePipelineLayout, nullptr);
     vkDestroyPipeline(device, projComputePipeline, nullptr);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
@@ -196,6 +203,14 @@ Engine::~Engine() {
     vkFreeMemory(device, valueBufferMemory, nullptr);
     vkDestroyBuffer(device, counterBuffer, nullptr);
     vkFreeMemory(device, counterBufferMemory, nullptr);
+    vkDestroyBuffer(device, pingpongBuffer, nullptr);
+    vkFreeMemory(device, pingpongBufferMemory, nullptr);
+    vkDestroyBuffer(device, tileRangeBuffer, nullptr);
+    vkFreeMemory(device, tileRangeBufferMemory, nullptr);
+    vkFreeMemory(device, projectedGaussianBufferMemory, nullptr);
+    vkDestroyBuffer(device, projectedGaussianBuffer, nullptr);
+    vkFreeMemory(device, gaussianBufferMemory, nullptr);
+    vkDestroyBuffer(device, gaussianBuffer, nullptr);
 
     for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
         vkDestroyBuffer(device, cameraBuffers[i], nullptr);
@@ -203,12 +218,8 @@ Engine::~Engine() {
         vkDestroyImageView(device, offscreenImageViews[i], nullptr);
         vkFreeMemory(device, cameraBufferMemory[i], nullptr);
         vkFreeMemory(device, imageMemory[i], nullptr);
+        vkDestroyFence(device, projFinshedFences[i], nullptr);
     }
-
-    vkFreeMemory(device, projectedGaussianBufferMemory, nullptr);
-    vkDestroyBuffer(device, projectedGaussianBuffer, nullptr);
-    vkFreeMemory(device, gaussianBufferMemory, nullptr);
-    vkDestroyBuffer(device, gaussianBuffer, nullptr);
 
     vkDestroyCommandPool(device, commandPool, nullptr);
     for (int i = 0; i < swapchainImageViews.size(); i++) {
@@ -718,9 +729,9 @@ void Engine::createDescriptorSets() {
     bufferInfo4.range = sizeof(uint32_t);
 
     VkDescriptorBufferInfo bufferInfo5{};
-    bufferInfo4.buffer = tileRangeBuffer;
-    bufferInfo4.offset = 0;
-    bufferInfo4.range = sizeof(TileRange) * num_tiles;
+    bufferInfo5.buffer = tileRangeBuffer;
+    bufferInfo5.offset = 0;
+    bufferInfo5.range = sizeof(TileRange) * num_tiles;
 
     std::array<VkWriteDescriptorSet, 6> descriptorWriteGlobal{};
     descriptorWriteGlobal[0] = {

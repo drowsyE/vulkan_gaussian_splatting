@@ -4,7 +4,6 @@
 #include <glfw/glfw3.h>
 #include <vector>
 
-#define VRDX_IMPLEMENTATIONS
 #include "vk_radix_sort.h"
 
 #include "gs_core.h"
@@ -103,6 +102,8 @@ private:
     VkPipeline projComputePipeline;
     VkPipelineLayout rangeComputePipelineLayout;
     VkPipeline rangeComputePipeline;
+    VkPipelineLayout rasterComputePipelineLayout;
+    VkPipeline rasterComputePipeline;
 
     void drawFrame();
     void train();

@@ -1,5 +1,4 @@
 #version 450
-#extension GL_ARB_gpu_shader_int64 : enable
 
 struct Gaussian2D {
     vec2 pos2d;
@@ -28,10 +27,74 @@ layout(set = 0, binding = 5) buffer TileRanges {
 
 layout(set = 1, binding = 1, rgba8) uniform writeonly image2D outImage;
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+// variables for shared group memory
+const uint BLOCK_SIZE = 256; // 16 x 16
+
+shared uint shared_indices[BLOCK_SIZE];
+shared Gaussian2D shared_gaussians[BLOCK_SIZE];
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    if (pixelCoord.x >= size.x || pixelCoord.y >= size.y) return;
+
+    // pixel 좌표를 기반으로 어느 타일에 속하는지 확인
+    uint n_cols = (size.x + 15u) >> 4u;
+    uint tx = pixelCoord.x >> 4u;
+    uint ty = pixelCoord.y >> 4u;
+    uint tileIdx = tx + ty * n_cols;
+
+    vec3 C = vec3(0.0); // color
+    float T = 1; // transmittance
+
+    uint start = ranges[tileIdx].start;
+    uint end = ranges[tileIdx].end;
+    uint localId = gl_LocalInvocationIndex; // 0 ~ 255
+
+    for (uint i = start; i < end; i++) {
+
+        uint globalIdx = i + localId;
+        
+        if (globalIdx < end) {
+            uint gIdx = values[globalIdx];
+            shared_indices[localId] = gIdx;
+            shared_gaussians[localId] = projectedGaussians[gIdx];
+        }
+        
+        // 2. 모든 스레드가 로딩을 마칠 때까지 대기 (동기화)
+        memoryBarrierShared();
+        barrier();
+
+        // 3. 현재 공유 메모리에 올라온 가우시안들로 연산
+        uint current_chunk_size = min(BLOCK_SIZE, end - i);
+        for (uint j = 0; j < current_chunk_size; j++) {
+            Gaussian2D g = shared_gaussians[j];
+
+        vec2 d = vec2(pixelCoord) - g.pos2d;
+
+        // e^(-1/2 * d^t * covariance_inv * d)
+        float power = -0.5 * (g.conics.x * d.x * d.x + 2.0 * g.conics.y * d.x * d.y + g.conics.z * d.y * d.y);
+        if (power > 0.0) continue; // skip if it's too far from mean
+
+        float alpha = min(0.99f, g.opacity * exp(power));
+        if (alpha < 1.0/255.0) continue; // skip if it's too transparent
+
+        float weight = alpha * T;
+        C += g.color * weight;
+        T *= (1.0 - alpha);
+
+        // Early Exit
+        if (T < 0.0001) break; 
+        }
+
+        // 4. 다음 뭉치를 가져오기 전 다시 동기화
+        barrier();
+        
+        if (T < 0.0001) break; // 픽셀의 색이 꽉 찼으면 루프 종료
+    }
     
-
-
+    // 최종 색상 기록
+    imageStore(outImage, pixelCoord, vec4(C, 1.0));
 }
