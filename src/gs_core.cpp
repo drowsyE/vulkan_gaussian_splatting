@@ -91,42 +91,6 @@ std::vector<Point> readPoints(const char *path) {
     return points;
 }
 
-// std::vector<Gaussian3D> gaussianFromPoints(const char *path) {
-//     std::ifstream file(path, std::ios::binary);
-
-//     uint64_t num_points;
-//     file.read((char *)&num_points, sizeof(num_points));
-
-//     std::vector<Gaussian3D> gaussians;
-//     Point p;
-//     for (int i = 0; i < num_points; i++) {
-//         file.read((char *)&p.id, sizeof(uint64_t));
-//         file.read((char *)&p.x, sizeof(double));
-//         file.read((char *)&p.y, sizeof(double));
-//         file.read((char *)&p.z, sizeof(double));
-//         file.read((char *)&p.r, sizeof(uint8_t));
-//         file.read((char *)&p.g, sizeof(uint8_t));
-//         file.read((char *)&p.b, sizeof(uint8_t));
-//         file.read((char *)&p.error, sizeof(double));
-
-//         uint64_t track_len; // number of pairs
-//         file.read((char *)&track_len, sizeof(track_len));
-
-//         // track skip
-//         file.ignore(track_len * sizeof(uint32_t) * 2); // (image_id, point2d_idx)
-
-//         Gaussian3D g;
-//         g.pos = glm::vec3(p.x, p.y, p.z);
-//         g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
-//         g.scaleOpacity = glm::vec4(0.01f, 0.01f, 0.01f, 1.0f);
-//         g.rot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-
-//         gaussians.push_back(g);
-//     }
-
-//     return gaussians;
-// }
-
 std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t size, size_t capacity) {
 
     std::vector<Gaussian3D> gaussians(capacity);
@@ -134,14 +98,15 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         Point p = points[i];
         Gaussian3D g;
         g.pos = glm::vec3(p.x, p.y, p.z);
-        // for debug
-        g.color = glm::vec3(255.0f, 255.0f, 255.0f);
-        g.scaleOpacity = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+        g.pad1 = 0.0f;
+        g.scaleOpacity = glm::vec4(0.05f, 0.05f, 0.05f, 1.0f);
+        // Default color: normalized from points (if available) or white for debug
         // g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
-        // g.scaleOpacity = glm::vec4(0.01f, 0.01f, 0.01f, 1.0f);
-        g.rot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        g.color = glm::vec3(1.f, 1.f, 1.f);
+        g.rot = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // Identity rotation (x,y,z=0, w=1)
+        g.pad2 = 0.0f;
 
-        gaussians.push_back(g);
+        gaussians[i] = g;
     }
 
     return gaussians;

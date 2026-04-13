@@ -31,20 +31,22 @@ typedef struct Point {
 } Point;
 
 typedef struct Gaussian3D {
-    glm::vec3 pos;
-    alignas(16) glm::vec4 scaleOpacity; // scale.x, scale.y, scale.z, opacity
-    glm::quat rot;
-    glm::vec3 color;
+    glm::vec3 pos;       
+    float pad1;          
+    glm::vec4 scaleOpacity; // x, y, z, opacity
+    glm::vec4 rot;       
+    glm::vec3 color;     
+    float pad2;          
 } Gaussian3D;
 
 typedef struct Gaussian2D { // Gaussians projected into screen plane
-    glm::vec2 pos2d;              // offset  0, size  8
-    float pad0[2];                // offset  8, size  8  (vec3 needs 16-byte align in std430)
-    glm::vec3 conics;             // offset 16, size 12
-    float opacity;                // offset 28, size  4
-    glm::vec3 color;              // offset 32, size 12
-    float pad1;                   // offset 44, size  4  (raster.comp에 bool flag 자리)
-} Gaussian2D ; // stride 48 bytes → std430 vec3 alignment 맞춤
+    glm::vec2 pos2d;            
+    float pad0[2];                
+    glm::vec3 conics;             
+    float opacity;                
+    glm::vec3 color;             
+    float pad1;                   
+} Gaussian2D ; 
 
 typedef struct TileRange {
     uint32_t start;
