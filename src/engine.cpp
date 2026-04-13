@@ -69,7 +69,7 @@ void Engine::drawFrame() {
                         0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
+    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &totalGaussians);
     VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
 
@@ -96,6 +96,7 @@ void Engine::drawFrame() {
                         0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipeline);
+    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
     vkCmdDispatch(cmdbuf, 1, 1, 1);
 
     memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -110,13 +111,25 @@ void Engine::drawFrame() {
     vkCmdDispatchIndirect(cmdbuf, indirectArgsBuffer, 0);
     
     // Pass 4 (splatting)
+    VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier imageBarrier{};
+    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageBarrier.image = offscreenImages[currentFrame];
+    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageBarrier.srcAccessMask = VK_ACCESS_NONE;
+    imageBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.subresourceRange = subresourceRange;
     
     memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(cmdbuf,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+                    0,
+                    1, &memoryBarrier, 0, nullptr, 1, &imageBarrier);
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
     vkCmdDispatch(cmdbuf, (render_width + 15) / 16, (render_height + 15) / 16, 1);
@@ -146,30 +159,26 @@ void Engine::drawFrame() {
     vkBeginCommandBuffer(cmdbuf, &beginInfo);
     
     // offscreen image
-    VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkImageMemoryBarrier imageBarrier{};
-    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    imageBarrier.image = offscreenImages[currentFrame];
     imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     imageBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.subresourceRange = subresourceRange;
 
     vkCmdPipelineBarrier(cmdbuf,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &imageBarrier);
 
     // swapchain image
     VkImageMemoryBarrier swapImageBarrier{};
+    swapImageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     swapImageBarrier.image = swapchainImages[imageIndex];
     swapImageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     swapImageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     swapImageBarrier.srcAccessMask = VK_ACCESS_NONE;
     swapImageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    swapImageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    swapImageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    swapImageBarrier.subresourceRange = subresourceRange;
     vkCmdPipelineBarrier(cmdbuf,
                          VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &swapImageBarrier);
@@ -257,7 +266,10 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     int n_tiles_col = (render_width + 15) >> 4;
     num_tiles = n_tiles_row*n_tiles_row;
     createStorageBuffer<TileRange>(num_tiles, tileRangeBuffer, tileRangeBufferMemory);
-    createStorageBuffer<uint32_t>(3, indirectArgsBuffer, indirectArgsBufferMemory);
+    createBuffer(sizeof(uint32_t) * 3,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 indirectArgsBuffer, indirectArgsBufferMemory);
 
     cameraBuffers.resize(MAX_FRAME_IN_FLIGHT);
     cameraBufferMemory.resize(MAX_FRAME_IN_FLIGHT);
@@ -268,11 +280,11 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
         createUniformBuffer<CameraUBO> (cameraBuffers[i], cameraBufferMemory[i], cameraBufferMapped[i]);
         createImage(render_width, render_height,
-                    VK_FORMAT_R8G8B8A8_SRGB,
+                    VK_FORMAT_R8G8B8A8_UNORM,
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                     offscreenImages[i], imageMemory[i]);
-        createImageView(VK_FORMAT_R8G8B8A8_SRGB, offscreenImages[i], offscreenImageViews[i]);
+        createImageView(VK_FORMAT_R8G8B8A8_UNORM, offscreenImages[i], offscreenImageViews[i]);
     }
     createSorterAndBuffer();
     createDescriptorSetLayouts();
@@ -292,6 +304,8 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 }
 
 Engine::~Engine() {
+    vkDeviceWaitIdle(device);
+
     // vkDestroyRenderPass(device, renderpass, nullptr);
     vkDestroyPipeline(device, argpassComputePipeline, nullptr);
     vkDestroyPipeline(device, rasterComputePipeline, nullptr);
@@ -705,8 +719,8 @@ void Engine::createSorterAndBuffer() {
     createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, keyBuffer, keyBufferMemory);
     createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, valueBuffer, valueBufferMemory);
     createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pingpongBuffer, pingpongBufferMemory);
-    // counterBuffer needs TRANSFER_DST to be reset every frame
-    createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, counterBuffer, counterBufferMemory);
+    // counterBuffer needs TRANSFER_DST to be reset every frame, and TRANSFER_SRC for sort
+    createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, counterBuffer, counterBufferMemory);
 }
 
 void Engine::createSyncObjects() {
@@ -1215,7 +1229,8 @@ void Engine::createStorageBuffer(std::vector<T> &srcBuffer,
     VkDeviceMemory stagingBufferMemory;
     void* pData;
 
-    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    createBuffer(size,
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  stagingBuffer, stagingBufferMemory);
     
@@ -1270,41 +1285,6 @@ void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkDeviceWaitIdle(device);
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 };
-
-// void Engine::recordCommandbuffer(VkCommandBuffer &cmdbuf) {
-
-//     VkCommandBufferBeginInfo beginInfo{};
-//     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-//     vkBeginCommandBuffer(cmdbuf, &beginInfo);
-
-//     // 옵션 A: 매 프레임 카운터를 0으로 덮어씀
-//     vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
-
-//     // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
-//     VkMemoryBarrier barrier{};
-//     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-//     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-//     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-//     vkCmdPipelineBarrier(cmdbuf,
-//                          VK_PIPELINE_STAGE_TRANSFER_BIT,
-//                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-//                          0, 1, &barrier, 0, nullptr, 0, nullptr);
-
-//     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-
-//     vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
-
-//     VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
-//     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-//                             projComputePipelineLayout, 0,
-//                             2, bindDescriptorSets,  // descriptor set count, pDescriptorSets
-//                             0, nullptr);
-
-//     uint32_t group = static_cast<uint32_t> (ceil(render_width / 256));
-//     vkCmdDispatch(cmdbuf, group, 1, 1);
-
-//     vkEndCommandBuffer(cmdbuf);
-// }
 
 }
 
