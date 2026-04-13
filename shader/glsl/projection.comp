@@ -1,5 +1,4 @@
 #version 450
-#extension GL_ARB_gpu_shader_int64 : enable
 
 struct Gaussian {
     vec3 mean;         // center
@@ -28,7 +27,7 @@ layout(set = 0, binding = 1) buffer Gaussian2DSSBO {
 };
 
 layout(set = 0, binding = 2) buffer Keys {
-    uint64_t keys[];
+    uint keys[];
 };
 
 layout(set = 0, binding = 3) buffer Values {
@@ -96,8 +95,8 @@ void main() {
     // );
     mat3x2 J = mat3x2( // 3열 2행 (matCxR)
         f_x / tz, 0.0, 
-        0.0, f_y / tz, 
-        -(f_x * t.x) / tz2, -(f_y * t.y) / tz2
+        0.0, -f_y / tz, 
+        -(f_x * t.x) / tz2, (f_y * t.y) / tz2
     );
 
     // 3. 변환 행렬 결합
@@ -179,8 +178,8 @@ void main() {
         for (int tx = min_tx; tx <= max_tx; ++tx) {
             uint tileID = tx + ty * n_cols;
             
-            // 상위 32비트에 Tile ID, 하위 32비트에 Depth 배치
-            uint64_t key = (uint64_t(tileID) << 32) | uint64_t(depthInt);
+            // 상위 16비트에 Tile ID, 하위 16비트에 Depth 배치
+            uint key = (tileID << 16) | (depthInt & 0xFFFF);
             
             uint write_idx = atomicAdd(kvCount, 1);
             if (write_idx >= push.kvCapacity) return; // OOB 방지

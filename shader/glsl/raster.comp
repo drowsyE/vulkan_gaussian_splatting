@@ -69,31 +69,31 @@ void main() {
         barrier();
 
         // 3. 현재 공유 메모리에 올라온 가우시안들로 연산
-        uint current_chunk_size = min(BLOCK_SIZE, end - i);
-        for (uint j = 0; j < current_chunk_size; j++) {
-            Gaussian2D g = shared_gaussians[j];
+        if (T >= 0.0001) {
+            uint current_chunk_size = min(BLOCK_SIZE, end - i);
+            for (uint j = 0; j < current_chunk_size; j++) {
+                Gaussian2D g = shared_gaussians[j];
 
-        vec2 d = vec2(pixelCoord) - g.pos2d;
+                vec2 d = vec2(pixelCoord) - g.pos2d;
 
-        // e^(-1/2 * d^t * covariance_inv * d)
-        float power = -0.5 * (g.conics.x * d.x * d.x + 2.0 * g.conics.y * d.x * d.y + g.conics.z * d.y * d.y);
-        if (power > 0.0) continue; // skip if it's too far from mean
+                // e^(-1/2 * d^t * covariance_inv * d)
+                float power = -0.5 * (g.conics.x * d.x * d.x + 2.0 * g.conics.y * d.x * d.y + g.conics.z * d.y * d.y);
+                if (power > 0.0) continue; // skip if it's too far from mean
 
-        float alpha = min(0.99f, g.opacity * exp(power));
-        if (alpha < 1.0/255.0) continue; // skip if it's too transparent
+                float alpha = min(0.99f, g.opacity * exp(power));
+                if (alpha < 1.0/255.0) continue; // skip if it's too transparent
 
-        float weight = alpha * T;
-        C += g.color * weight;
-        T *= (1.0 - alpha);
+                float weight = alpha * T;
+                C += g.color * weight;
+                T *= (1.0 - alpha);
 
-        // Early Exit
-        if (T < 0.0001) break; 
+                // Early Exit (inner loop only)
+                if (T < 0.0001) break; 
+            }
         }
 
         // 4. 다음 뭉치를 가져오기 전 다시 동기화
         barrier();
-        
-        if (T < 0.0001) break; // 픽셀의 색이 꽉 찼으면 루프 종료
     }
     
     // 최종 색상 기록

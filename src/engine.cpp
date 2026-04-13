@@ -102,6 +102,7 @@ void Engine::drawFrame() {
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipeline);
     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+    vkCmdPushConstants(cmdbuf, argpassComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &KVCapacity);
     vkCmdDispatch(cmdbuf, 1, 1, 1);
 
     memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -304,7 +305,12 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     createComputePipeline(projComputePipeline, projComputePipelineLayout, "../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
     createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 0, nullptr, 1, &globalDescriptorSetLayout);
     createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout, "../shader/spv/raster.spv", 0, nullptr, setLayout.size(), setLayout.data());
-    createComputePipeline(argpassComputePipeline, argpassComputePipelineLayout, "../shader/spv/argpass.spv", 0, nullptr, setLayout.size(), setLayout.data());
+    VkPushConstantRange argpassPush{};
+    argpassPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    argpassPush.offset = 0;
+    argpassPush.size = sizeof(uint32_t); // kvCapacity
+
+    createComputePipeline(argpassComputePipeline, argpassComputePipelineLayout, "../shader/spv/argpass.spv", 1, &argpassPush, setLayout.size(), setLayout.data());
     // createRenderpass();
 }
 
@@ -712,7 +718,7 @@ void Engine::createSorterAndBuffer() {
     };
     vrdxCreateSorter(&sorterInfo, &sorter);
     
-    KVCapacity = maxGaussians * 32; // static pre-allocation pool
+    KVCapacity = maxGaussians * 64; // static pre-allocation pool (increased to fix blocks)
 
     // VkDeviceSize keyBufferSize = totalKVCount * sizeof(uint64_t);
     // VkDeviceSize valueBufferSize = totalKVCount * sizeof(uint32_t);
@@ -876,7 +882,7 @@ void Engine::createDescriptorSets() {
     VkDescriptorBufferInfo bufferInfo2{};
     bufferInfo2.buffer = keyBuffer;
     bufferInfo2.offset = 0;
-    bufferInfo2.range = sizeof(uint64_t) * KVCapacity;
+    bufferInfo2.range = sizeof(uint32_t) * KVCapacity;
 
     VkDescriptorBufferInfo bufferInfo3{};
     bufferInfo3.buffer = valueBuffer;
@@ -1322,7 +1328,7 @@ void Engine::updateCameraUBO() {
     front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
     cameraFront = glm::normalize(front);
 
-    updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height);
+    updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
     memcpy(cameraBufferMapped[currentFrame], &camUBO, sizeof(CameraUBO));
 }
 void Engine::setCameraFromColmap(const Image& image) {
@@ -1334,11 +1340,19 @@ void Engine::setCameraFromColmap(const Image& image) {
     glm::mat3 R_wc = glm::transpose(R_cw);
     cameraPos = -R_wc * t_cw;
 
-    // Colmap convention: camera looks along +Z in camera space
+    // Colmap convention: camera space is X-right, Y-down, Z-forward
+    // World space Up vector of the camera is R_wc * (0, -1, 0)
     cameraFront = glm::normalize(R_wc * glm::vec3(0.0f, 0.0f, 1.0f));
+    cameraUp = glm::normalize(R_wc * glm::vec3(0.0f, -1.0f, 0.0f));
     
     pitch = glm::degrees(asin(cameraFront.y));
     yaw = glm::degrees(atan2(cameraFront.z, cameraFront.x));
+
+    // Force update immediately
+    updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
+    for(int i=0; i<MAX_FRAME_IN_FLIGHT; ++i) {
+        memcpy(cameraBufferMapped[i], &camUBO, sizeof(CameraUBO));
+    }
 }
 
 }

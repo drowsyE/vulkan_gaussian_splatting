@@ -1,12 +1,20 @@
-// shader for argument preparation 
 #version 450
 
-layout(set = 0, binding = 4) buffer readonly Counter { uint num_keys; };
+layout(set = 0, binding = 4) buffer Counter { uint num_keys; };
 layout(set = 0, binding = 6) buffer IndirectArgs { uint x; uint y; uint z; };
+
+layout(push_constant) uniform Push {
+    uint kvCapacity;
+} push;
 
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
+    // Clamping kvCount to capacity prevents OOB reads in subsequent stages
+    if (num_keys > push.kvCapacity) {
+        num_keys = push.kvCapacity;
+    }
+    
     x = (num_keys + 255) / 256;
     y = 1;
     z = 1;

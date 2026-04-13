@@ -3,9 +3,9 @@
 
 namespace Core {
 
-void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float width, float height) {
+void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float width, float height, glm::vec3 up) {
     // 1. View Matrix (카메라 위치와 방향)
-    ubo.view = glm::lookAt(position, lookAt, glm::vec3(0.0f, 1.0f, 0.0f));
+    ubo.view = glm::lookAt(position, lookAt, up);
 
     // 2. Projection Matrix (원근감)
     // 3DGS 논문 기준으로는 fovX, fovY를 통해 계산된 투영 행렬을 사용합니다.

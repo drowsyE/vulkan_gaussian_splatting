@@ -1,5 +1,4 @@
 #version 450
-#extension GL_ARB_gpu_shader_int64 : enable
 
 struct TileRange {
     uint start;
@@ -7,7 +6,7 @@ struct TileRange {
 };
 
 layout(set = 0, binding = 2) buffer readonly Keys {
-    uint64_t keys[];
+    uint keys[];
 };
 
 layout(set = 0, binding = 4) buffer readonly Counter {
@@ -25,13 +24,13 @@ void main() {
     uint id = gl_GlobalInvocationID.x;
     if (id >= kvCount) return;
 
-    uint64_t currentKey = keys[id];
-    uint currentTile = uint(currentKey >> 32);
+    uint currentKey = keys[id];
+    uint currentTile = uint(currentKey >> 16);
 
     if (id == 0) {
         ranges[currentTile].start = 0;
     } else {
-        uint prevTile = uint(keys[id - 1] >> 32);
+        uint prevTile = uint(keys[id - 1] >> 16);
         if (currentTile != prevTile) {
             ranges[prevTile].end = id;      // 이전 타일 종료
             ranges[currentTile].start = id; // 현재 타일 시작
