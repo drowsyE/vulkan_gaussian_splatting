@@ -37,91 +37,196 @@ std::vector<const char*> deviceExtensions {
 };
 
 void Engine::run() {
-
-    while (!glfwWindowShouldClose(pWindow)) {
-
-        VkCommandBuffer cmdbuf = commandBuffers[currentFrame];
-
-        // Pass 1
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        vkBeginCommandBuffer(cmdbuf, &beginInfo);
-
-        // 매 프레임 카운터를 0으로 덮어씀
-        vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
-
-        // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
-        VkMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmdbuf,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            0, 1, &barrier, 0, nullptr, 0, nullptr);
-
-        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-
-        vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
-
-        VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
-        vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
-
-        vkCmdDispatch(cmdbuf, ceil(render_width / 256), 1, 1);
-
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        vkCmdPipelineBarrier(cmdbuf,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            VK_PIPELINE_STAGE_HOST_BIT,
-                            0, 1, &barrier, 0, nullptr, 0, nullptr);
-        vkEndCommandBuffer(cmdbuf);
-        
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.pCommandBuffers = &cmdbuf;
-        submitInfo.commandBufferCount = 1;
-        vkQueueSubmit(computeQueue, 1, &submitInfo, projFinshedFences[currentFrame]);
-
-        vkWaitForFences(device, 1, &projFinshedFences[currentFrame], VK_TRUE, UINT64_MAX); // GPU가 다 끝날 때까지 대기
-        vkResetFences(device, 1, &projFinshedFences[currentFrame]);
-
-        // Pass 2
-        uint32_t num_keys = *(int*)pCounter;
-        vkBeginCommandBuffer(cmdbuf, &beginInfo);
-        vrdxCmdSortKeyValue(cmdbuf, sorter, num_keys, keyBuffer, 0, valueBuffer, 0, pingpongBuffer, 0, VK_NULL_HANDLE, 0);
-
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmdbuf,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            0, 1, &barrier, 0, nullptr, 0, nullptr);
-
-        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipeline);
-        vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1, &globalDescriptorSets, 0, nullptr);
-        vkCmdDispatch(cmdbuf, ceil(num_keys / 256), 0, 0);
-
-        vkEndCommandBuffer(cmdbuf);
-
-        vkQueueSubmit(computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        
-        
-
+    // while (!glfwWindowShouldClose(pWindow)) {
         glfwPollEvents();
         drawFrame();
-
-
-        currentFrame = (currentFrame + 1) % MAX_FRAME_IN_FLIGHT;
-    }
+    // }
 }
 
-// void Renderer::train() {
-
-// }
-
 void Engine::drawFrame() {
-   
+    VkCommandBuffer cmdbuf = computeCommandBuffers[currentFrame];
+
+    vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &computeInFlightFences[currentFrame]);
+    vkResetCommandBuffer(cmdbuf, 0);
+
+    // Pass 1 (projection, binning)
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkBeginCommandBuffer(cmdbuf, &beginInfo);
+
+    // 매 프레임 카운터를 0으로 덮어씀
+    vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
+
+    // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
+    VkMemoryBarrier memoryBarrier{};
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
+    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
+    VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
+    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+
+    vkCmdDispatch(cmdbuf, (render_width + 255) / 256, 1, 1);
+
+    // Pass 2 (sorting)
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+
+    vrdxCmdSortKeyValueIndirect(cmdbuf, sorter, KVCapacity,
+                                counterBuffer, 0, keyBuffer, 0,
+                                valueBuffer, 0, pingpongBuffer, 0,
+                                VK_NULL_HANDLE, 0);
+
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipeline);
+    vkCmdDispatch(cmdbuf, 1, 1, 1);
+
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipeline);
+    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1, &globalDescriptorSets, 0, nullptr);
+    vkCmdDispatchIndirect(cmdbuf, indirectArgsBuffer, 0);
+    
+    // Pass 4 (splatting)
+    
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
+    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+    vkCmdDispatch(cmdbuf, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+    vkEndCommandBuffer(cmdbuf);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pCommandBuffers = &cmdbuf;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &computeFinishedSemaphore[currentFrame];
+    vkQueueSubmit(computeQueue, 1, &submitInfo, computeInFlightFences[currentFrame]);
+
+    // <-------- graphics submission  -------->
+    cmdbuf = graphicsCommandBuffers[currentFrame];
+
+    // fence
+    vkWaitForFences(device, 1, &graphicsInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &graphicsInFlightFences[currentFrame]);
+    vkResetCommandBuffer(cmdbuf, 0);
+
+    uint32_t imageIndex;
+    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+    vkResetCommandBuffer(cmdbuf, 0);
+    vkBeginCommandBuffer(cmdbuf, &beginInfo);
+    
+    // offscreen image
+    VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkImageMemoryBarrier imageBarrier{};
+    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageBarrier.image = offscreenImages[currentFrame];
+    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    imageBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.subresourceRange = subresourceRange;
+
+    vkCmdPipelineBarrier(cmdbuf,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &imageBarrier);
+
+    // swapchain image
+    VkImageMemoryBarrier swapImageBarrier{};
+    swapImageBarrier.image = swapchainImages[imageIndex];
+    swapImageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    swapImageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    swapImageBarrier.srcAccessMask = VK_ACCESS_NONE;
+    swapImageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &swapImageBarrier);
+
+    VkImageBlit region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.srcOffsets[0] = {0, 0, 0};
+    region.srcOffsets[1] = {(int)render_width, (int)render_height, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstOffsets[0] = {0, 0, 0};
+    region.dstOffsets[1] = {(int)swapchainImageExtent.width, (int)swapchainImageExtent.height, 1};
+    vkCmdBlitImage(cmdbuf,
+                   offscreenImages[currentFrame], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   swapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &region, VK_FILTER_LINEAR);
+    
+    // offscreen image
+    imageBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    imageBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &imageBarrier);
+
+    // swapchain image
+    swapImageBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    swapImageBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    swapImageBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    swapImageBarrier.dstAccessMask = VK_ACCESS_NONE;
+    vkCmdPipelineBarrier(cmdbuf,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &swapImageBarrier); 
+
+    vkEndCommandBuffer(cmdbuf);
+
+    VkSemaphore waitSemaphores[] = {computeFinishedSemaphore[currentFrame], imageAvailableSemaphore[currentFrame]};
+    VkPipelineStageFlags waitStageMask[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.pCommandBuffers = &cmdbuf;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.waitSemaphoreCount = 2;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStageMask;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &renderFinishedSemaphore[currentFrame];
+    vkQueueSubmit(graphicsQueue, 1, &submitInfo, graphicsInFlightFences[currentFrame]); // fence?
+
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.pImageIndices = &imageIndex;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &swapchain;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &renderFinishedSemaphore[imageIndex];
+    vkQueuePresentKHR(presentQueue, &presentInfo);
+
+    currentFrame = (currentFrame + 1) % MAX_FRAME_IN_FLIGHT;
 }
 
 Engine::Engine(){};
@@ -152,6 +257,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     int n_tiles_col = (render_width + 15) >> 4;
     num_tiles = n_tiles_row*n_tiles_row;
     createStorageBuffer<TileRange>(num_tiles, tileRangeBuffer, tileRangeBufferMemory);
+    createStorageBuffer<uint32_t>(3, indirectArgsBuffer, indirectArgsBufferMemory);
 
     cameraBuffers.resize(MAX_FRAME_IN_FLIGHT);
     cameraBufferMemory.resize(MAX_FRAME_IN_FLIGHT);
@@ -181,36 +287,47 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     createComputePipeline(projComputePipeline, projComputePipelineLayout, "../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
     createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 0, nullptr, 1, &globalDescriptorSetLayout);
     createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout, "../shader/spv/raster.spv", 0, nullptr, setLayout.size(), setLayout.data());
+    createComputePipeline(argpassComputePipeline, argpassComputePipelineLayout, "../shader/spv/argpass.spv", 0, nullptr, setLayout.size(), setLayout.data());
     // createRenderpass();
 }
 
 Engine::~Engine() {
     // vkDestroyRenderPass(device, renderpass, nullptr);
-    vkDestroyPipelineLayout(device, rasterComputePipelineLayout, nullptr);
+    vkDestroyPipeline(device, argpassComputePipeline, nullptr);
     vkDestroyPipeline(device, rasterComputePipeline, nullptr);
-    vkDestroyPipelineLayout(device, rangeComputePipelineLayout, nullptr);
     vkDestroyPipeline(device, rangeComputePipeline, nullptr);
-    vkDestroyPipelineLayout(device, projComputePipelineLayout, nullptr);
     vkDestroyPipeline(device, projComputePipeline, nullptr);
+    vkDestroyPipelineLayout(device, argpassComputePipelineLayout, nullptr);
+    vkDestroyPipelineLayout(device, rasterComputePipelineLayout, nullptr);
+    vkDestroyPipelineLayout(device, rangeComputePipelineLayout, nullptr); 
+    vkDestroyPipelineLayout(device, projComputePipelineLayout, nullptr);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device, localDescriptorSetLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
 
     vrdxDestroySorter(sorter);
+
     vkDestroyBuffer(device, keyBuffer, nullptr);
-    vkFreeMemory(device, keyBufferMemory, nullptr);
     vkDestroyBuffer(device, valueBuffer, nullptr);
-    vkFreeMemory(device, valueBufferMemory, nullptr);
     vkDestroyBuffer(device, counterBuffer, nullptr);
-    vkFreeMemory(device, counterBufferMemory, nullptr);
     vkDestroyBuffer(device, pingpongBuffer, nullptr);
-    vkFreeMemory(device, pingpongBufferMemory, nullptr);
     vkDestroyBuffer(device, tileRangeBuffer, nullptr);
-    vkFreeMemory(device, tileRangeBufferMemory, nullptr);
-    vkFreeMemory(device, projectedGaussianBufferMemory, nullptr);
-    vkDestroyBuffer(device, projectedGaussianBuffer, nullptr);
-    vkFreeMemory(device, gaussianBufferMemory, nullptr);
+    vkDestroyBuffer(device, indirectArgsBuffer, nullptr);
     vkDestroyBuffer(device, gaussianBuffer, nullptr);
+    vkDestroyBuffer(device, projectedGaussianBuffer, nullptr);
+
+    vkFreeMemory(device, keyBufferMemory, nullptr);
+    vkFreeMemory(device, valueBufferMemory, nullptr);
+    vkFreeMemory(device, counterBufferMemory, nullptr);
+    vkFreeMemory(device, pingpongBufferMemory, nullptr);
+    vkFreeMemory(device, tileRangeBufferMemory, nullptr);
+    vkFreeMemory(device, indirectArgsBufferMemory, nullptr);
+    vkFreeMemory(device, gaussianBufferMemory, nullptr);
+    vkFreeMemory(device, projectedGaussianBufferMemory, nullptr);
+
+    for (int i = 0; i < swapchainImages.size(); i++) {
+        vkDestroySemaphore(device, renderFinishedSemaphore[i], nullptr);
+    }
 
     for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
         vkDestroyBuffer(device, cameraBuffers[i], nullptr);
@@ -218,7 +335,10 @@ Engine::~Engine() {
         vkDestroyImageView(device, offscreenImageViews[i], nullptr);
         vkFreeMemory(device, cameraBufferMemory[i], nullptr);
         vkFreeMemory(device, imageMemory[i], nullptr);
-        vkDestroyFence(device, projFinshedFences[i], nullptr);
+        vkDestroyFence(device, computeInFlightFences[i], nullptr);
+        vkDestroyFence(device, graphicsInFlightFences[i], nullptr);
+        vkDestroySemaphore(device, imageAvailableSemaphore[i], nullptr);
+        vkDestroySemaphore(device, computeFinishedSemaphore[i], nullptr);
     }
 
     vkDestroyCommandPool(device, commandPool, nullptr);
@@ -553,14 +673,16 @@ void Engine::createCommandPool() {
 }
 
 void Engine::createCommandBuffers() {
-    commandBuffers.resize(MAX_FRAME_IN_FLIGHT);
+    computeCommandBuffers.resize(MAX_FRAME_IN_FLIGHT);
+    graphicsCommandBuffers.resize(MAX_FRAME_IN_FLIGHT);
 
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = MAX_FRAME_IN_FLIGHT;
     allocInfo.commandPool = commandPool;
-    vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data());
+    vkAllocateCommandBuffers(device, &allocInfo, computeCommandBuffers.data());
+    vkAllocateCommandBuffers(device, &allocInfo, graphicsCommandBuffers.data());
 }
 
 void Engine::createSorterAndBuffer() {
@@ -584,25 +706,38 @@ void Engine::createSorterAndBuffer() {
     createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, valueBuffer, valueBufferMemory);
     createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pingpongBuffer, pingpongBufferMemory);
     // counterBuffer needs TRANSFER_DST to be reset every frame
-    createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, counterBuffer, counterBufferMemory);
-    vkMapMemory(device, counterBufferMemory, 0, counterBufferSize, 0, &pCounter);
+    createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, counterBuffer, counterBufferMemory);
 }
 
 void Engine::createSyncObjects() {
-    projFinshedFences.resize(MAX_FRAME_IN_FLIGHT);
+    computeInFlightFences.resize(MAX_FRAME_IN_FLIGHT);
+    graphicsInFlightFences.resize(MAX_FRAME_IN_FLIGHT);
+    computeFinishedSemaphore.resize(MAX_FRAME_IN_FLIGHT);
+    imageAvailableSemaphore.resize(MAX_FRAME_IN_FLIGHT);
+    renderFinishedSemaphore.resize(swapchainImages.size());
 
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    // fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    
+    VkSemaphoreCreateInfo semaInfo{};
+    semaInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    
     for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
-        vkCreateFence(device, &fenceInfo, nullptr, &projFinshedFences[i]);
+        vkCreateSemaphore(device, &semaInfo, nullptr, &computeFinishedSemaphore[i]);
+        vkCreateSemaphore(device, &semaInfo, nullptr, &imageAvailableSemaphore[i]);
+        vkCreateFence(device, &fenceInfo, nullptr, &graphicsInFlightFences[i]);
+        vkCreateFence(device, &fenceInfo, nullptr, &computeInFlightFences[i]);
+    }
+    for (int i = 0; i < swapchainImages.size(); i++) {
+        vkCreateSemaphore(device, &semaInfo, nullptr, &renderFinishedSemaphore[i]);
     }
 }
 
 void Engine::createDescriptorSetLayouts() {
 
     // 1. global descriptor
-    std::array<VkDescriptorSetLayoutBinding, 6> globalBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 7> globalBindings{};
     globalBindings[0].binding = 0;
     globalBindings[0].descriptorCount = 1;
     globalBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -633,11 +768,17 @@ void Engine::createDescriptorSetLayouts() {
     globalBindings[4].pImmutableSamplers = nullptr;
     globalBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    globalBindings[5].binding = 5; // Counter
+    globalBindings[5].binding = 5; // Tile ranges
     globalBindings[5].descriptorCount = 1;
     globalBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     globalBindings[5].pImmutableSamplers = nullptr;
     globalBindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    globalBindings[6].binding = 6; // Dispatch xyz
+    globalBindings[6].descriptorCount = 1;
+    globalBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    globalBindings[6].pImmutableSamplers = nullptr;
+    globalBindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
     setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -671,7 +812,7 @@ void Engine::createDescriptorPool() {
     std::array<VkDescriptorPoolSize, 3> poolSizes;
     poolSizes[0] = {
         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 6
+        .descriptorCount = 7
     };
     poolSizes[1] = {
         .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -733,7 +874,12 @@ void Engine::createDescriptorSets() {
     bufferInfo5.offset = 0;
     bufferInfo5.range = sizeof(TileRange) * num_tiles;
 
-    std::array<VkWriteDescriptorSet, 6> descriptorWriteGlobal{};
+    VkDescriptorBufferInfo bufferInfo6{};
+    bufferInfo6.buffer = indirectArgsBuffer;
+    bufferInfo6.offset = 0;
+    bufferInfo6.range = sizeof(uint32_t) * 3;
+
+    std::array<VkWriteDescriptorSet, 7> descriptorWriteGlobal{};
     descriptorWriteGlobal[0] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .pNext = nullptr,
@@ -809,6 +955,19 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo5,
+        .pTexelBufferView = nullptr
+    };
+
+    descriptorWriteGlobal[6] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = nullptr,
+        .dstSet = globalDescriptorSets,
+        .dstBinding = 6,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pImageInfo = nullptr,
+        .pBufferInfo = &bufferInfo6,
         .pTexelBufferView = nullptr
     };
 
@@ -1112,40 +1271,40 @@ void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 };
 
-void Engine::recordCommandbuffer(VkCommandBuffer &cmdbuf) {
+// void Engine::recordCommandbuffer(VkCommandBuffer &cmdbuf) {
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer(cmdbuf, &beginInfo);
+//     VkCommandBufferBeginInfo beginInfo{};
+//     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+//     vkBeginCommandBuffer(cmdbuf, &beginInfo);
 
-    // 옵션 A: 매 프레임 카운터를 0으로 덮어씀
-    vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
+//     // 옵션 A: 매 프레임 카운터를 0으로 덮어씀
+//     vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
 
-    // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+//     // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
+//     VkMemoryBarrier barrier{};
+//     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+//     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+//     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+//     vkCmdPipelineBarrier(cmdbuf,
+//                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+//                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+//                          0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
+//     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
 
-    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
+//     vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, 0, sizeof(uint32_t), &totalGaussians);
 
-    VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
-    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            projComputePipelineLayout, 0,
-                            2, bindDescriptorSets,  // descriptor set count, pDescriptorSets
-                            0, nullptr);
+//     VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
+//     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+//                             projComputePipelineLayout, 0,
+//                             2, bindDescriptorSets,  // descriptor set count, pDescriptorSets
+//                             0, nullptr);
 
-    uint32_t group = static_cast<uint32_t> (ceil(render_width / 256));
-    vkCmdDispatch(cmdbuf, group, 1, 1);
+//     uint32_t group = static_cast<uint32_t> (ceil(render_width / 256));
+//     vkCmdDispatch(cmdbuf, group, 1, 1);
 
-    vkEndCommandBuffer(cmdbuf);
-}
+//     vkEndCommandBuffer(cmdbuf);
+// }
 
 }
 

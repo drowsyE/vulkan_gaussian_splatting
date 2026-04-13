@@ -54,10 +54,15 @@ private:
 
     VkRenderPass renderpass;
 
-    std::vector<VkFence> projFinshedFences;
+    std::vector<VkSemaphore> computeFinishedSemaphore;
+    std::vector<VkSemaphore> imageAvailableSemaphore;
+    std::vector<VkSemaphore> renderFinishedSemaphore;
+    std::vector<VkFence> computeInFlightFences;
+    std::vector<VkFence> graphicsInFlightFences;
 
     VkCommandPool commandPool;
-    std::vector<VkCommandBuffer> commandBuffers;
+    std::vector<VkCommandBuffer> computeCommandBuffers;
+    std::vector<VkCommandBuffer> graphicsCommandBuffers;
 
     VkBuffer gaussianBuffer;
     VkDeviceMemory gaussianBufferMemory;
@@ -75,7 +80,8 @@ private:
     VkDeviceMemory pingpongBufferMemory;
     VkBuffer counterBuffer;
     VkDeviceMemory counterBufferMemory;
-    void* pCounter;
+    VkBuffer indirectArgsBuffer;
+    VkDeviceMemory indirectArgsBufferMemory;
 
     uint32_t num_tiles;
     VkBuffer tileRangeBuffer;
@@ -90,7 +96,6 @@ private:
     std::vector<VkImage> offscreenImages;
     std::vector<VkImageView> offscreenImageViews;
     std::vector<VkDeviceMemory> imageMemory;
-    // VkSampler sampler;
 
     VkDescriptorPool descriptorPool;
     VkDescriptorSetLayout globalDescriptorSetLayout; // gaussian buffer
@@ -104,6 +109,8 @@ private:
     VkPipeline rangeComputePipeline;
     VkPipelineLayout rasterComputePipelineLayout;
     VkPipeline rasterComputePipeline;
+    VkPipelineLayout argpassComputePipelineLayout;
+    VkPipeline argpassComputePipeline;
 
     void drawFrame();
     void train();
