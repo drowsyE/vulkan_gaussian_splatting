@@ -33,10 +33,13 @@ void main() {
     } else {
         uint prevTile = uint(keys[id - 1] >> 32);
         if (currentTile != prevTile) {
-            ranges[prevTile].end = id;     // 이전 타일 종료
+            ranges[prevTile].end = id;      // 이전 타일 종료
             ranges[currentTile].start = id; // 현재 타일 시작
         }
-}
+    }
 
-    
+    // 마지막 원소: 해당 타일의 .end를 kvCount로 설정
+    if (id == kvCount - 1) {
+        ranges[currentTile].end = kvCount;
+    }
 }

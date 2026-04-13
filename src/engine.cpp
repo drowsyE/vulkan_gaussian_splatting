@@ -30,17 +30,20 @@ std::vector<const char*> validationLayer {
 std::vector<const char*> deviceExtensions {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
-    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // for vrdx
+    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // for radix sort
 #if __APPLE__
     "VK_KHR_portability_subset"
 #endif
 };
 
 void Engine::run() {
-    // while (!glfwWindowShouldClose(pWindow)) {
+
+
+    while (!glfwWindowShouldClose(pWindow)) {
         glfwPollEvents();
+        updateCameraUBO();
         drawFrame();
-    // }
+    }
 }
 
 void Engine::drawFrame() {
@@ -55,8 +58,9 @@ void Engine::drawFrame() {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkBeginCommandBuffer(cmdbuf, &beginInfo);
 
-    // 매 프레임 카운터를 0으로 덮어씀
+    // 매 프레임 카운터와 타일 범위 버퍼를 0으로 초기화
     vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(cmdbuf, tileRangeBuffer, 0, VK_WHOLE_SIZE, 0);
 
     // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
     VkMemoryBarrier memoryBarrier{};
@@ -68,12 +72,13 @@ void Engine::drawFrame() {
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
+    uint32_t pushData[2] = {totalGaussians, KVCapacity};
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &totalGaussians);
+    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), pushData);
     VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
 
-    vkCmdDispatch(cmdbuf, (render_width + 255) / 256, 1, 1);
+    vkCmdDispatch(cmdbuf, (totalGaussians + 255) / 256, 1, 1);
 
     // Pass 2 (sorting)
     memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -223,7 +228,7 @@ void Engine::drawFrame() {
     submitInfo.pWaitSemaphores = waitSemaphores;
     submitInfo.pWaitDstStageMask = waitStageMask;
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &renderFinishedSemaphore[currentFrame];
+    submitInfo.pSignalSemaphores = &renderFinishedSemaphore[imageIndex];
     vkQueueSubmit(graphicsQueue, 1, &submitInfo, graphicsInFlightFences[currentFrame]); // fence?
 
     VkPresentInfoKHR presentInfo{};
@@ -256,15 +261,15 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     render_width = src_width * scale;
     render_height = src_height * scale;
     totalGaussians = points.size();
-    gaussBufferCapacity = totalGaussians << 2;
-    std::vector<Gaussian3D> src_tmp = gaussianFromPoints(points, totalGaussians, gaussBufferCapacity);
+    maxGaussians = totalGaussians << 2;
+    std::vector<Gaussian3D> src_tmp = gaussianFromPoints(points, totalGaussians, maxGaussians);
     
     createStorageBuffer<Gaussian3D>(src_tmp, gaussianBuffer, gaussianBufferMemory);
-    createStorageBuffer<Gaussian2D>(gaussBufferCapacity, projectedGaussianBuffer, projectedGaussianBufferMemory);
+    createStorageBuffer<Gaussian2D>(maxGaussians, projectedGaussianBuffer, projectedGaussianBufferMemory);
     
     int n_tiles_row = (render_height + 15) >> 4;
     int n_tiles_col = (render_width + 15) >> 4;
-    num_tiles = n_tiles_row*n_tiles_row;
+    num_tiles = n_tiles_row*n_tiles_col;
     createStorageBuffer<TileRange>(num_tiles, tileRangeBuffer, tileRangeBufferMemory);
     createBuffer(sizeof(uint32_t) * 3,
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
@@ -294,7 +299,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     VkPushConstantRange push{};
     push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     push.offset = 0;
-    push.size = sizeof(int);
+    push.size = sizeof(uint32_t) * 2; // totalGaussians + kvCapacity
     std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
     createComputePipeline(projComputePipeline, projComputePipelineLayout, "../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
     createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 0, nullptr, 1, &globalDescriptorSetLayout);
@@ -636,46 +641,46 @@ void Engine::createSwapchainImageViews() {
     }
 }
 
-void Engine::createRenderpass() {
+// void Engine::createRenderpass() {
 
-    VkAttachmentDescription colorAtt{};
-    colorAtt.format = swapchainImageFormat;
-    colorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_NONE; // 이미 compute shader에서 그렸기 때문
-    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAtt.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
-    colorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+//     VkAttachmentDescription colorAtt{};
+//     colorAtt.format = swapchainImageFormat;
+//     colorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+//     colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_NONE; // 이미 compute shader에서 그렸기 때문
+//     colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+//     colorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+//     colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+//     colorAtt.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+//     colorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     
-    VkAttachmentReference colorAttRef{};
-    colorAttRef.attachment = 0;
-    colorAttRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+//     VkAttachmentReference colorAttRef{};
+//     colorAttRef.attachment = 0;
+//     colorAttRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorAttRef;
+//     VkSubpassDescription subpass{};
+//     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+//     subpass.colorAttachmentCount = 1;
+//     subpass.pColorAttachments = &colorAttRef;
 
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.srcAccessMask = 0;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+//     VkSubpassDependency dependency{};
+//     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+//     dependency.dstSubpass = 0;
+//     dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+//     dependency.srcAccessMask = 0;
+//     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+//     dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-    VkRenderPassCreateInfo renderInfo{};
-    renderInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderInfo.attachmentCount = 1;
-    renderInfo.pAttachments = &colorAtt;
-    renderInfo.subpassCount = 1;
-    renderInfo.pSubpasses = &subpass;
-    renderInfo.dependencyCount = 1;
-    renderInfo.pDependencies = &dependency;
+//     VkRenderPassCreateInfo renderInfo{};
+//     renderInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+//     renderInfo.attachmentCount = 1;
+//     renderInfo.pAttachments = &colorAtt;
+//     renderInfo.subpassCount = 1;
+//     renderInfo.pSubpasses = &subpass;
+//     renderInfo.dependencyCount = 1;
+//     renderInfo.pDependencies = &dependency;
 
-    vkCreateRenderPass(device, &renderInfo, nullptr, &renderpass);
-}
+//     vkCreateRenderPass(device, &renderInfo, nullptr, &renderpass);
+// }
 
 void Engine::createCommandPool() {
     VkCommandPoolCreateInfo poolInfo{};
@@ -707,7 +712,7 @@ void Engine::createSorterAndBuffer() {
     };
     vrdxCreateSorter(&sorterInfo, &sorter);
     
-    KVCapacity = gaussBufferCapacity * 32; // static pre-allocation pool
+    KVCapacity = maxGaussians * 32; // static pre-allocation pool
 
     // VkDeviceSize keyBufferSize = totalKVCount * sizeof(uint64_t);
     // VkDeviceSize valueBufferSize = totalKVCount * sizeof(uint32_t);
@@ -861,12 +866,12 @@ void Engine::createDescriptorSets() {
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = gaussianBuffer;
     bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(Gaussian3D) * gaussBufferCapacity; 
+    bufferInfo.range = sizeof(Gaussian3D) * maxGaussians; 
 
     VkDescriptorBufferInfo bufferInfo1{};
     bufferInfo1.buffer = projectedGaussianBuffer;
     bufferInfo1.offset = 0;
-    bufferInfo1.range = sizeof(Gaussian2D) * gaussBufferCapacity; 
+    bufferInfo1.range = sizeof(Gaussian2D) * maxGaussians; 
 
     VkDescriptorBufferInfo bufferInfo2{};
     bufferInfo2.buffer = keyBuffer;
@@ -1285,6 +1290,56 @@ void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkDeviceWaitIdle(device);
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 };
+
+void Engine::updateCameraUBO() {
+    float moveSpeed = 0.05f;
+    float rotSpeed = 1.0f;
+
+    if (glfwGetKey(pWindow, GLFW_KEY_W) == GLFW_PRESS)
+        cameraPos += moveSpeed * cameraFront;
+    if (glfwGetKey(pWindow, GLFW_KEY_S) == GLFW_PRESS)
+        cameraPos -= moveSpeed * cameraFront;
+    if (glfwGetKey(pWindow, GLFW_KEY_A) == GLFW_PRESS)
+        cameraPos -= glm::normalize(glm::cross(cameraFront, cameraUp)) * moveSpeed;
+    if (glfwGetKey(pWindow, GLFW_KEY_D) == GLFW_PRESS)
+        cameraPos += glm::normalize(glm::cross(cameraFront, cameraUp)) * moveSpeed;
+
+    if (glfwGetKey(pWindow, GLFW_KEY_UP) == GLFW_PRESS)
+        pitch += rotSpeed;
+    if (glfwGetKey(pWindow, GLFW_KEY_DOWN) == GLFW_PRESS)
+        pitch -= rotSpeed;
+    if (glfwGetKey(pWindow, GLFW_KEY_LEFT) == GLFW_PRESS)
+        yaw -= rotSpeed;
+    if (glfwGetKey(pWindow, GLFW_KEY_RIGHT) == GLFW_PRESS)
+        yaw += rotSpeed;
+
+    if (pitch > 89.0f) pitch = 89.0f;
+    if (pitch < -89.0f) pitch = -89.0f;
+
+    glm::vec3 front;
+    front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+    front.y = sin(glm::radians(pitch));
+    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+    cameraFront = glm::normalize(front);
+
+    updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height);
+    memcpy(cameraBufferMapped[currentFrame], &camUBO, sizeof(CameraUBO));
+}
+void Engine::setCameraFromColmap(const Image& image) {
+    glm::quat q(image.q[0], image.q[1], image.q[2], image.q[3]);
+    glm::mat3 R_cw = glm::mat3_cast(q);
+    glm::vec3 t_cw(image.t[0], image.t[1], image.t[2]);
+    
+    // camera pose C = -R_cw^T * t_cw
+    glm::mat3 R_wc = glm::transpose(R_cw);
+    cameraPos = -R_wc * t_cw;
+
+    // Colmap convention: camera looks along +Z in camera space
+    cameraFront = glm::normalize(R_wc * glm::vec3(0.0f, 0.0f, 1.0f));
+    
+    pitch = glm::degrees(asin(cameraFront.y));
+    yaw = glm::degrees(atan2(cameraFront.z, cameraFront.x));
+}
 
 }
 

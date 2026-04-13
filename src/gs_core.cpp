@@ -134,8 +134,11 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         Point p = points[i];
         Gaussian3D g;
         g.pos = glm::vec3(p.x, p.y, p.z);
-        g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
-        g.scaleOpacity = glm::vec4(0.01f, 0.01f, 0.01f, 1.0f);
+        // for debug
+        g.color = glm::vec3(255.0f, 255.0f, 255.0f);
+        g.scaleOpacity = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+        // g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
+        // g.scaleOpacity = glm::vec4(0.01f, 0.01f, 0.01f, 1.0f);
         g.rot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
 
         gaussians.push_back(g);

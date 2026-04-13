@@ -38,11 +38,13 @@ typedef struct Gaussian3D {
 } Gaussian3D;
 
 typedef struct Gaussian2D { // Gaussians projected into screen plane
-    glm::vec2 pos2d;
-    alignas(8) glm::vec3 conics; // inverse covariance의 상삼각 성분 (3개)
-    float opacity;
-    glm::vec3 color;
-} Gaussian2D ;
+    glm::vec2 pos2d;              // offset  0, size  8
+    float pad0[2];                // offset  8, size  8  (vec3 needs 16-byte align in std430)
+    glm::vec3 conics;             // offset 16, size 12
+    float opacity;                // offset 28, size  4
+    glm::vec3 color;              // offset 32, size 12
+    float pad1;                   // offset 44, size  4  (raster.comp에 bool flag 자리)
+} Gaussian2D ; // stride 48 bytes → std430 vec3 alignment 맞춤
 
 typedef struct TileRange {
     uint32_t start;

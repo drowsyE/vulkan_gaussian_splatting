@@ -12,13 +12,6 @@
 
 namespace Core {
 
-typedef struct RendererInfo {
-    size_t src_width;
-    size_t src_height;
-    float scale;
-    uint64_t n_gaussians;
-} RendererInfo;
-
 class Engine {
 
 public:
@@ -27,12 +20,13 @@ public:
     ~Engine();
 
     void run();
+    void setCameraFromColmap(const Image& image);
 
 private:
 
     uint32_t render_width, render_height;
     uint32_t totalGaussians;
-    uint32_t gaussBufferCapacity;
+    uint32_t maxGaussians; // capacity
 
     VkDebugUtilsMessengerEXT debugMessenger;
 
@@ -52,8 +46,6 @@ private:
     VkFormat swapchainImageFormat;
     VkExtent2D swapchainImageExtent;
 
-    VkRenderPass renderpass;
-
     std::vector<VkSemaphore> computeFinishedSemaphore;
     std::vector<VkSemaphore> imageAvailableSemaphore;
     std::vector<VkSemaphore> renderFinishedSemaphore;
@@ -64,31 +56,37 @@ private:
     std::vector<VkCommandBuffer> computeCommandBuffers;
     std::vector<VkCommandBuffer> graphicsCommandBuffers;
 
-    VkBuffer gaussianBuffer;
-    VkDeviceMemory gaussianBufferMemory;
-    VkBuffer projectedGaussianBuffer;
-    VkDeviceMemory projectedGaussianBufferMemory;
-
     uint32_t KVCapacity;
     uint32_t counter;
+
     VrdxSorter sorter;
+
+    VkBuffer gaussianBuffer;
+    VkBuffer projectedGaussianBuffer;
     VkBuffer keyBuffer;
-    VkDeviceMemory keyBufferMemory;
     VkBuffer valueBuffer;
-    VkDeviceMemory valueBufferMemory;
     VkBuffer pingpongBuffer;
-    VkDeviceMemory pingpongBufferMemory;
     VkBuffer counterBuffer;
-    VkDeviceMemory counterBufferMemory;
     VkBuffer indirectArgsBuffer;
+
+    VkDeviceMemory gaussianBufferMemory;
+    VkDeviceMemory projectedGaussianBufferMemory;
+    VkDeviceMemory keyBufferMemory;
+    VkDeviceMemory valueBufferMemory;
+    VkDeviceMemory pingpongBufferMemory;
+    VkDeviceMemory counterBufferMemory;
     VkDeviceMemory indirectArgsBufferMemory;
 
     uint32_t num_tiles;
     VkBuffer tileRangeBuffer;
     VkDeviceMemory tileRangeBufferMemory;
 
-
     CameraUBO camUBO;
+    glm::vec3 cameraPos{0.0f, 0.0f, 5.0f};
+    glm::vec3 cameraFront{0.0f, 0.0f, -1.0f};
+    glm::vec3 cameraUp{0.0f, 1.0f, 0.0f};
+    float yaw{-90.0f};
+    float pitch{0.0f};
     std::vector<VkBuffer> cameraBuffers; // need to be resized
     std::vector<VkDeviceMemory> cameraBufferMemory;
     std::vector<void*> cameraBufferMapped;
@@ -113,7 +111,6 @@ private:
     VkPipeline argpassComputePipeline;
 
     void drawFrame();
-    void train();
 
     void initWindow();
     void createInstance();
@@ -122,7 +119,6 @@ private:
     void createLogicalDevice();
     void createSwapchain();
     void createSwapchainImageViews();
-    void createRenderpass();
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                       VkMemoryPropertyFlags properties,
                       VkBuffer &buffer, VkDeviceMemory &bufferMemory);
@@ -152,13 +148,12 @@ private:
                                uint32_t setLayoutCount, VkDescriptorSetLayout* pSetLayouts);
     void createCommandPool();
     void createCommandBuffers();
-    void createFrameBuffers();
     void createSyncObjects();
-    void recordCommandbuffer(VkCommandBuffer &cmdbuf);
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     VkCommandBuffer beginSingleTimeCommands();
     void endSingleTimeCommands(VkCommandBuffer commandBuffer);
+    void updateCameraUBO();
 };
 
 }

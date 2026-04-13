@@ -12,9 +12,11 @@ struct Gaussian {
 
 struct Gaussian2D {
     vec2 pos2d;
+    vec2 pad0;   // padding: vec3 conics는 16-byte align
     vec3 conics; // inverse covariance의 상삼각 성분 (3개)
     float opacity;
     vec3 color;
+    float pad1;  // padding for stride 48 bytes
 };
 
 layout(set = 0, binding = 0) buffer readonly GaussianSSBO {
@@ -49,6 +51,7 @@ layout(set = 1, binding = 0) uniform CameraUBO {
 
 layout(push_constant) uniform PushConstant {
     int totalGaussians;
+    uint kvCapacity;
 } push;
 
 mat3 quaternionToRotationMatrix(vec4 q) {
@@ -180,6 +183,7 @@ void main() {
             uint64_t key = (uint64_t(tileID) << 32) | uint64_t(depthInt);
             
             uint write_idx = atomicAdd(kvCount, 1);
+            if (write_idx >= push.kvCapacity) return; // OOB 방지
             keys[write_idx] = key;
             values[write_idx] = idx;
         }

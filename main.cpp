@@ -24,8 +24,12 @@ int main() {
     std::vector<Core::Camera> cameras = Core::readCameras("../sparse/0/cameras.bin");
     std::vector<Core::Image> images = Core::readImages("../sparse/0/images.bin");
     std::vector<Core::Point> points = Core::readPoints("../sparse/0/points3D.bin");
+    printf("Number of points : %zu\n", points.size());
     
     Core::Engine engine(cameras[0].width, cameras[0].height, 0.5, points);
+    if (!images.empty()) {
+        engine.setCameraFromColmap(images[0]);
+    }
     engine.run();
 
 }

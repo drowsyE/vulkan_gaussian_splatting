@@ -2,10 +2,11 @@
 
 struct Gaussian2D {
     vec2 pos2d;
+    vec2 pad0;   // padding: vec3 conics는 16-byte align
     vec3 conics; // inverse covariance의 상삼각 성분 (3개)
     float opacity;
     vec3 color;
-    bool flag;
+    float pad1;  // bool flag 자리, projection에서는 미사용
 };
 
 struct TileRange {
@@ -53,7 +54,7 @@ void main() {
     uint end = ranges[tileIdx].end;
     uint localId = gl_LocalInvocationIndex; // 0 ~ 255
 
-    for (uint i = start; i < end; i++) {
+    for (uint i = start; i < end; i += BLOCK_SIZE) {
 
         uint globalIdx = i + localId;
         
