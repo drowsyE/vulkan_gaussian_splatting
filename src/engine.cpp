@@ -1392,6 +1392,10 @@ void Engine::updateCameraUBO(float deltaTime) {
         cameraPos += moveSpeed * cameraFront;
     if (glfwGetKey(pWindow, GLFW_KEY_S) == GLFW_PRESS)
         cameraPos -= moveSpeed * cameraFront;
+	if (glfwGetKey(pWindow, GLFW_KEY_SPACE) == GLFW_PRESS)
+		cameraPos += moveSpeed * cameraUp;
+	if (glfwGetKey(pWindow, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+		cameraPos -= moveSpeed * cameraUp;
     if (glfwGetKey(pWindow, GLFW_KEY_A) == GLFW_PRESS)
         cameraPos -= glm::normalize(glm::cross(cameraFront, cameraUp)) * moveSpeed;
     if (glfwGetKey(pWindow, GLFW_KEY_D) == GLFW_PRESS)
