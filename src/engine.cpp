@@ -6,42 +6,51 @@
 #include "gs_core.h"
 
 #include <iostream>
-#include <vector>
 #include <stdexcept>
+#include <vector>
 
 #define MAX_FRAME_IN_FLIGHT 2
 int currentFrame = 0;
 
-const int DEFAULT_WIDTH = 800;
-const int DEFAULT_HEIGHT = 600;
+const int DEFAULT_WIDTH = 1200;
+const int DEFAULT_HEIGHT = 1000;
 
 namespace Core {
 
 #ifdef NDEBUG
-    bool enableValidationLayers = false;
-#else 
-    bool enableValidationLayers = true;
+bool enableValidationLayers = false;
+#else
+bool enableValidationLayers = true;
 #endif
 
-std::vector<const char*> validationLayer {
-    "VK_LAYER_KHRONOS_validation"
-};
+std::vector<const char *> validationLayer{"VK_LAYER_KHRONOS_validation"};
 
-std::vector<const char*> deviceExtensions {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
+std::vector<const char *> deviceExtensions {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
     VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // for radix sort
-#if __APPLE__
+    #if __APPLE__
     "VK_KHR_portability_subset"
-#endif
-};
+    #endif
+    };
 
 void Engine::run() {
-
+    double previousTime = glfwGetTime();
+    double lastFrameTime = previousTime;
+    int frameCount = 0;
 
     while (!glfwWindowShouldClose(pWindow)) {
+        double currentTime = glfwGetTime();
+        float deltaTime = static_cast<float>(currentTime - lastFrameTime);
+        lastFrameTime = currentTime;
+        frameCount++;
+        if (currentTime - previousTime >= 1.0) {
+            std::cout << "FPS: " << frameCount << std::endl;
+            frameCount = 0;
+            previousTime = currentTime;
+        }
+
         glfwPollEvents();
-        updateCameraUBO();
+        updateCameraUBO(deltaTime);
         drawFrame();
     }
 }
@@ -50,6 +59,7 @@ void Engine::drawFrame() {
     VkCommandBuffer cmdbuf = computeCommandBuffers[currentFrame];
 
     vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    vkWaitForFences(device, 1, &computeInFlightFences[(currentFrame + 1) % MAX_FRAME_IN_FLIGHT], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &computeInFlightFences[currentFrame]);
     vkResetCommandBuffer(cmdbuf, 0);
 
@@ -58,64 +68,89 @@ void Engine::drawFrame() {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkBeginCommandBuffer(cmdbuf, &beginInfo);
 
-    // 매 프레임 카운터와 타일 범위 버퍼를 0으로 초기화
+    // 매 프레임 카운터, 타일 범위, key/value 버퍼를 0으로 초기화
+    // key/value를 초기화하지 않으면 이전 프레임의 잔재 데이터가 sort 후 유효
+    // 범위로 이동하여 OOB 접근 가능
     vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
     vkCmdFillBuffer(cmdbuf, tileRangeBuffer, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(cmdbuf, projectedGaussianBuffer, 0, VK_WHOLE_SIZE, 0); // Clear so culled entries have opacity=0
+    vkCmdFillBuffer(cmdbuf, keyBuffer, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(cmdbuf, valueBuffer, 0, VK_WHOLE_SIZE, 0xFFFFFFFF);
 
-    // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute 셰이더 대기)
+    // 메모리 배리어 설정 (전송 작업에서 0으로 초기화가 완료될 때까지 compute
+    // 셰이더 대기)
     VkMemoryBarrier memoryBarrier{};
     memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                    &memoryBarrier, 0, nullptr, 0, nullptr);
 
     uint32_t pushData[2] = {totalGaussians, KVCapacity};
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), pushData);
+    vkCmdPushConstants(cmdbuf, projComputePipelineLayout,   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), pushData);
     VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
 
     vkCmdDispatch(cmdbuf, (totalGaussians + 255) / 256, 1, 1);
 
-    // Pass 2 (sorting)
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
-
-    vrdxCmdSortKeyValueIndirect(cmdbuf, sorter, KVCapacity,
-                                counterBuffer, 0, keyBuffer, 0,
-                                valueBuffer, 0, pingpongBuffer, 0,
-                                VK_NULL_HANDLE, 0);
-
+    // // Pass 2 (Argpass to clamp counter and prepare indirect args)
+    // Sort pipeline bypassed - using brute-force raster
+    // TODO: Debug vrdx sort output buffer location
     memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                    &memoryBarrier, 0, nullptr, 0, nullptr);
 
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipeline);
-    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
-    vkCmdPushConstants(cmdbuf, argpassComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &KVCapacity);
-    vkCmdDispatch(cmdbuf, 1, 1, 1);
+    // vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+    //                   argpassComputePipeline);
+    // vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+    //                         argpassComputePipelineLayout, 0, 2,
+    //                         bindDescriptorSets, 0, nullptr);
+    // vkCmdPushConstants(cmdbuf, argpassComputePipelineLayout,
+    //                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t),
+    //                    &KVCapacity);
+    // vkCmdDispatch(cmdbuf, 1, 1, 1);
 
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    // // Pass 3 (Sorting)
+    // // We need careful barriers here because Sort reads from counter and
+    // // keys/values
+    // memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    // memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+    //                               VK_ACCESS_TRANSFER_READ_BIT |
+    //                               VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    // vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    //                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+    //                          VK_PIPELINE_STAGE_TRANSFER_BIT |
+    //                          VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+    //                      0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipeline);
-    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1, &globalDescriptorSets, 0, nullptr);
-    vkCmdDispatchIndirect(cmdbuf, indirectArgsBuffer, 0);
-    
+    // vrdxCmdSortKeyValueIndirect(cmdbuf, sorter, KVCapacity, counterBuffer, 0,
+    //                             keyBuffer, 0, valueBuffer, 0, pingpongBuffer, 0,
+    //                             VK_NULL_HANDLE, 0);
+
+    // // Pass 4 (Range Identification)
+    // // Wait for sort to finish (Transfer/Compute write)
+    // memoryBarrier.srcAccessMask =
+    //     VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    // memoryBarrier.dstAccessMask =
+    //     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    // vkCmdPipelineBarrier(cmdbuf,
+    //                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+    //                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+    //                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+    //                      &memoryBarrier, 0, nullptr, 0, nullptr);
+
+    // // vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+    // // rangeComputePipeline); vkCmdBindDescriptorSets(cmdbuf,
+    // // VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1,
+    // // &globalDescriptorSets, 0, nullptr); vkCmdPushConstants(cmdbuf,
+    // // rangeComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+    // // sizeof(uint32_t), &num_tiles); vkCmdDispatchIndirect(cmdbuf,
+    // // indirectArgsBuffer, 0);
+
     // Pass 4 (splatting)
     VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageMemoryBarrier imageBarrier{};
@@ -128,14 +163,10 @@ void Engine::drawFrame() {
     imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.subresourceRange = subresourceRange;
-    
+
     memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0,
-                    1, &memoryBarrier, 0, nullptr, 1, &imageBarrier);
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memoryBarrier, 0, nullptr, 1, &imageBarrier);
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
     vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
     vkCmdDispatch(cmdbuf, (render_width + 15) / 16, (render_height + 15) / 16, 1);
@@ -159,20 +190,22 @@ void Engine::drawFrame() {
     vkResetCommandBuffer(cmdbuf, 0);
 
     uint32_t imageIndex;
-    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore[currentFrame], VK_NULL_HANDLE, &imageIndex);
+    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+                    imageAvailableSemaphore[currentFrame], VK_NULL_HANDLE,
+                    &imageIndex);
 
     vkResetCommandBuffer(cmdbuf, 0);
     vkBeginCommandBuffer(cmdbuf, &beginInfo);
-    
+
     // offscreen image
     imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     imageBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-    vkCmdPipelineBarrier(cmdbuf,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &imageBarrier);
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                    nullptr, 1, &imageBarrier);
 
     // swapchain image
     VkImageMemoryBarrier swapImageBarrier{};
@@ -185,9 +218,9 @@ void Engine::drawFrame() {
     swapImageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     swapImageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     swapImageBarrier.subresourceRange = subresourceRange;
-    vkCmdPipelineBarrier(cmdbuf,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &swapImageBarrier);
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                    nullptr, 1, &swapImageBarrier);
 
     VkImageBlit region{};
     region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -195,34 +228,34 @@ void Engine::drawFrame() {
     region.srcOffsets[1] = {(int)render_width, (int)render_height, 1};
     region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.dstOffsets[0] = {0, 0, 0};
-    region.dstOffsets[1] = {(int)swapchainImageExtent.width, (int)swapchainImageExtent.height, 1};
-    vkCmdBlitImage(cmdbuf,
-                   offscreenImages[currentFrame], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   swapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &region, VK_FILTER_LINEAR);
-    
+    region.dstOffsets[1] = {(int)swapchainImageExtent.width,
+                        (int)swapchainImageExtent.height, 1};
+    vkCmdBlitImage(
+    cmdbuf, offscreenImages[currentFrame],
+    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchainImages[imageIndex],
+    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
+
     // offscreen image
     imageBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     imageBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     imageBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &imageBarrier);
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
+                    nullptr, 1, &imageBarrier);
 
     // swapchain image
     swapImageBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     swapImageBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     swapImageBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     swapImageBarrier.dstAccessMask = VK_ACCESS_NONE;
-    vkCmdPipelineBarrier(cmdbuf,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &swapImageBarrier); 
-
+    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+                    nullptr, 1, &swapImageBarrier);
     vkEndCommandBuffer(cmdbuf);
 
     VkSemaphore waitSemaphores[] = {computeFinishedSemaphore[currentFrame], imageAvailableSemaphore[currentFrame]};
-    VkPipelineStageFlags waitStageMask[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkPipelineStageFlags waitStageMask[] = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
     submitInfo.pCommandBuffers = &cmdbuf;
     submitInfo.commandBufferCount = 1;
     submitInfo.waitSemaphoreCount = 2;
@@ -230,7 +263,7 @@ void Engine::drawFrame() {
     submitInfo.pWaitDstStageMask = waitStageMask;
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &renderFinishedSemaphore[imageIndex];
-    vkQueueSubmit(graphicsQueue, 1, &submitInfo, graphicsInFlightFences[currentFrame]); // fence?
+    vkQueueSubmit(graphicsQueue, 1, &submitInfo, graphicsInFlightFences[currentFrame]);
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -252,7 +285,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     setupDebugMessenger();
     glfwCreateWindowSurface(instance, pWindow, nullptr, &surface);
     pickPhysicalDevice();
-    createLogicalDevice();  
+    createLogicalDevice();
     createSwapchain();
     createSwapchainImageViews();
     createCommandPool();
@@ -262,15 +295,15 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     render_width = src_width * scale;
     render_height = src_height * scale;
     totalGaussians = points.size();
-    maxGaussians = totalGaussians << 2;
+    maxGaussians = totalGaussians << 1;
     std::vector<Gaussian3D> src_tmp = gaussianFromPoints(points, totalGaussians, maxGaussians);
-    
+
     createStorageBuffer<Gaussian3D>(src_tmp, gaussianBuffer, gaussianBufferMemory);
     createStorageBuffer<Gaussian2D>(maxGaussians, projectedGaussianBuffer, projectedGaussianBufferMemory);
-    
+
     int n_tiles_row = (render_height + 15) >> 4;
     int n_tiles_col = (render_width + 15) >> 4;
-    num_tiles = n_tiles_row*n_tiles_col;
+    num_tiles = n_tiles_row * n_tiles_col;
     createStorageBuffer<TileRange>(num_tiles, tileRangeBuffer, tileRangeBufferMemory);
     createBuffer(sizeof(uint32_t) * 3,
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
@@ -284,7 +317,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     offscreenImageViews.resize(MAX_FRAME_IN_FLIGHT);
     imageMemory.resize(MAX_FRAME_IN_FLIGHT);
     for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
-        createUniformBuffer<CameraUBO> (cameraBuffers[i], cameraBufferMemory[i], cameraBufferMapped[i]);
+        createUniformBuffer<CameraUBO>(cameraBuffers[i], cameraBufferMemory[i], cameraBufferMapped[i]);
         createImage(render_width, render_height,
                     VK_FORMAT_R8G8B8A8_UNORM,
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -303,20 +336,23 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     push.size = sizeof(uint32_t) * 2; // totalGaussians + kvCapacity
     std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
     createComputePipeline(projComputePipeline, projComputePipelineLayout, "../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
-    createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 0, nullptr, 1, &globalDescriptorSetLayout);
+    VkPushConstantRange rangePush{};
+    rangePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    rangePush.offset = 0;
+    rangePush.size = sizeof(uint32_t); // num_tiles
+    createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout, "../shader/spv/range.spv", 1, &rangePush, 1, &globalDescriptorSetLayout);
     createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout, "../shader/spv/raster.spv", 0, nullptr, setLayout.size(), setLayout.data());
+    
     VkPushConstantRange argpassPush{};
     argpassPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     argpassPush.offset = 0;
     argpassPush.size = sizeof(uint32_t); // kvCapacity
-
     createComputePipeline(argpassComputePipeline, argpassComputePipelineLayout, "../shader/spv/argpass.spv", 1, &argpassPush, setLayout.size(), setLayout.data());
     // createRenderpass();
 }
 
 Engine::~Engine() {
     vkDeviceWaitIdle(device);
-
     // vkDestroyRenderPass(device, renderpass, nullptr);
     vkDestroyPipeline(device, argpassComputePipeline, nullptr);
     vkDestroyPipeline(device, rasterComputePipeline, nullptr);
@@ -324,7 +360,7 @@ Engine::~Engine() {
     vkDestroyPipeline(device, projComputePipeline, nullptr);
     vkDestroyPipelineLayout(device, argpassComputePipelineLayout, nullptr);
     vkDestroyPipelineLayout(device, rasterComputePipelineLayout, nullptr);
-    vkDestroyPipelineLayout(device, rangeComputePipelineLayout, nullptr); 
+    vkDestroyPipelineLayout(device, rangeComputePipelineLayout, nullptr);
     vkDestroyPipelineLayout(device, projComputePipelineLayout, nullptr);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device, localDescriptorSetLayout, nullptr);
@@ -399,12 +435,12 @@ void Engine::createInstance() {
     appInfo.apiVersion = VK_API_VERSION_1_4;
 
     uint32_t extCount;
-    const char** ext = glfwGetRequiredInstanceExtensions(&extCount);
-    std::vector<const char*> instanceExtensions(ext, ext + extCount);
+    const char **ext = glfwGetRequiredInstanceExtensions(&extCount);
+    std::vector<const char *> instanceExtensions(ext, ext + extCount);
 
     #ifdef __APPLE__
-        instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-        instanceExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    instanceExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
     #endif
 
     if (enableValidationLayers) {
@@ -424,22 +460,21 @@ void Engine::createInstance() {
     if (enableValidationLayers) {
         instanceInfo.enabledLayerCount = validationLayer.size();
         instanceInfo.ppEnabledLayerNames = validationLayer.data();
-        instanceInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &messengerInfo;
+        instanceInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT *)&messengerInfo;
     } else {
         instanceInfo.enabledLayerCount = 0;
         instanceInfo.ppEnabledLayerNames = nullptr;
     }
 
     #ifdef __APPLE__
-        instanceInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-    #endif 
-    
+    instanceInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    #endif
+
     vkCreateInstance(&instanceInfo, nullptr, &instance);
 }
 
 void Engine::setupDebugMessenger() {
-    if (!enableValidationLayers)
-        return;
+    if (!enableValidationLayers) return;
 
     VkDebugUtilsMessengerCreateInfoEXT createInfo{};
     populateDebugMessenger(createInfo);
@@ -461,16 +496,17 @@ void Engine::pickPhysicalDevice() {
         uint32_t n_queue;
         vkGetPhysicalDeviceQueueFamilyProperties(device, &n_queue, nullptr);
         std::vector<VkQueueFamilyProperties> deviceQueueProps(n_queue);
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &n_queue, deviceQueueProps.data());
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &n_queue,
+                                                deviceQueueProps.data());
 
         graphicsAndComputeFamilyIndex = -1;
         presentFamilyIndex = -1;
         for (int i = 0; i < deviceQueueProps.size(); i++) {
             if (deviceQueueProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT &&
                 deviceQueueProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                    graphicsAndComputeFamilyIndex = i;
-                }
-            
+                graphicsAndComputeFamilyIndex = i;
+            }
+
             VkBool32 presentSupport = VK_FALSE;
             vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
             if (presentSupport) {
@@ -481,7 +517,7 @@ void Engine::pickPhysicalDevice() {
                 physDev = device;
                 printf("\n[Info] | Device selected : %s\n", deviceProps.deviceName);
                 printf("[Info] | Graphics Family : %d, Present Family : %d\n",
-                    graphicsAndComputeFamilyIndex, presentFamilyIndex);
+                        graphicsAndComputeFamilyIndex, presentFamilyIndex);
                 return;
             }
         }
@@ -530,7 +566,7 @@ void Engine::createLogicalDevice() {
         deviceInfo.enabledLayerCount = 0;
         deviceInfo.ppEnabledLayerNames = nullptr;
     }
-    
+
     vkCreateDevice(physDev, &deviceInfo, nullptr, &device);
 
     vkGetDeviceQueue(device, graphicsAndComputeFamilyIndex, 0, &graphicsQueue);
@@ -539,7 +575,7 @@ void Engine::createLogicalDevice() {
 }
 
 void Engine::createSwapchain() {
-    VkSurfaceCapabilitiesKHR surfaceCaps;    
+    VkSurfaceCapabilitiesKHR surfaceCaps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physDev, surface, &surfaceCaps);
 
     uint32_t minImageCount;
@@ -600,7 +636,7 @@ void Engine::createSwapchain() {
     VkSwapchainCreateInfoKHR swapchainInfo{};
     swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     swapchainInfo.surface = surface;
-    swapchainInfo.minImageCount =  minImageCount;
+    swapchainInfo.minImageCount = minImageCount;
     swapchainInfo.imageFormat = format;
     swapchainInfo.imageColorSpace = colorspace;
     swapchainInfo.imageExtent = imageExtent;
@@ -622,7 +658,7 @@ void Engine::createSwapchain() {
 
 void Engine::createSwapchainImageViews() {
     swapchainImageViews.resize(swapchainImages.size());
-    
+
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.format = swapchainImageFormat;
@@ -658,7 +694,7 @@ void Engine::createSwapchainImageViews() {
 //     colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 //     colorAtt.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
 //     colorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    
+
 //     VkAttachmentReference colorAttRef{};
 //     colorAttRef.attachment = 0;
 //     colorAttRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -671,9 +707,9 @@ void Engine::createSwapchainImageViews() {
 //     VkSubpassDependency dependency{};
 //     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
 //     dependency.dstSubpass = 0;
-//     dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+//     dependency.srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 //     dependency.srcAccessMask = 0;
-//     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+//     dependency.dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 //     dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
 //     VkRenderPassCreateInfo renderInfo{};
@@ -727,8 +763,13 @@ void Engine::createSorterAndBuffer() {
     VrdxSorterStorageRequirements reqs;
     vrdxGetSorterKeyValueStorageRequirements(sorter, KVCapacity, &reqs);
 
-    createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, keyBuffer, keyBufferMemory);
-    createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, valueBuffer, valueBufferMemory);
+    // key/value 버퍼는 최소 KVCapacity * sizeof(uint32_t) 이상이어야 함
+    // reqs.size는 sort 내부 스토리지(pingpong) 전용 크기이므로 별도로 계산
+    VkDeviceSize kvBufferSize = std::max(reqs.size, (VkDeviceSize)(KVCapacity * sizeof(uint32_t)));
+    VkBufferUsageFlags kvUsage = reqs.usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    createBuffer(kvBufferSize, kvUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, keyBuffer, keyBufferMemory);
+    createBuffer(kvBufferSize, kvUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, valueBuffer, valueBufferMemory);
     createBuffer(reqs.size, reqs.usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pingpongBuffer, pingpongBufferMemory);
     // counterBuffer needs TRANSFER_DST to be reset every frame, and TRANSFER_SRC for sort
     createBuffer(counterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, counterBuffer, counterBufferMemory);
@@ -744,10 +785,10 @@ void Engine::createSyncObjects() {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    
+
     VkSemaphoreCreateInfo semaInfo{};
     semaInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    
+
     for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
         vkCreateSemaphore(device, &semaInfo, nullptr, &computeFinishedSemaphore[i]);
         vkCreateSemaphore(device, &semaInfo, nullptr, &imageAvailableSemaphore[i]);
@@ -759,7 +800,7 @@ void Engine::createSyncObjects() {
     }
 }
 
-void Engine::createDescriptorSetLayouts() {
+    void Engine::createDescriptorSetLayouts() {
 
     // 1. global descriptor
     std::array<VkDescriptorSetLayoutBinding, 7> globalBindings{};
@@ -858,8 +899,9 @@ void Engine::createDescriptorPool() {
 
 void Engine::createDescriptorSets() {
 
-    // printf("DEBUG | global descriptor set layout : %p\n", (void*)globalDescriptorSetLayout);
-    // printf("DEBUG | local descriptor set layout : %p\n", (void*)localDescriptorSetLayout);
+    // printf("DEBUG | global descriptor set layout : %p\n",
+    // (void*)globalDescriptorSetLayout); printf("DEBUG | local descriptor set
+    // layout : %p\n", (void*)localDescriptorSetLayout);
 
     // 1. global descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};
@@ -867,17 +909,22 @@ void Engine::createDescriptorSets() {
     allocInfo.descriptorPool = descriptorPool;
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &globalDescriptorSetLayout;
+
+    // if (vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSets) !=
+    //     VK_SUCCESS) {
+    //   throw std::runtime_error("failed to allocate global descriptor set!");
+    // }
     vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSets);
 
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = gaussianBuffer;
     bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(Gaussian3D) * maxGaussians; 
+    bufferInfo.range = sizeof(Gaussian3D) * maxGaussians;
 
     VkDescriptorBufferInfo bufferInfo1{};
     bufferInfo1.buffer = projectedGaussianBuffer;
     bufferInfo1.offset = 0;
-    bufferInfo1.range = sizeof(Gaussian2D) * maxGaussians; 
+    bufferInfo1.range = sizeof(Gaussian2D) * maxGaussians;
 
     VkDescriptorBufferInfo bufferInfo2{};
     bufferInfo2.buffer = keyBuffer;
@@ -915,7 +962,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     descriptorWriteGlobal[1] = {
@@ -928,7 +975,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo1,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     descriptorWriteGlobal[2] = {
@@ -941,7 +988,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo2,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     descriptorWriteGlobal[3] = {
@@ -954,7 +1001,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo3,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     descriptorWriteGlobal[4] = {
@@ -967,7 +1014,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo4,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     descriptorWriteGlobal[5] = {
@@ -980,7 +1027,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo5,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     descriptorWriteGlobal[6] = {
@@ -993,7 +1040,7 @@ void Engine::createDescriptorSets() {
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pImageInfo = nullptr,
         .pBufferInfo = &bufferInfo6,
-        .pTexelBufferView = nullptr
+        .pTexelBufferView = nullptr,
     };
 
     vkUpdateDescriptorSets(device, descriptorWriteGlobal.size(), descriptorWriteGlobal.data(), 0, nullptr);
@@ -1012,12 +1059,12 @@ void Engine::createDescriptorSets() {
         VkDescriptorBufferInfo camInfo{};
         camInfo.buffer = cameraBuffers[i];
         camInfo.offset = 0;
-        camInfo.range = sizeof(CameraUBO); 
+        camInfo.range = sizeof(CameraUBO);
 
         VkDescriptorImageInfo imgInfo{};
         imgInfo.imageView = offscreenImageViews[i];
         imgInfo.sampler = nullptr;
-        imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL; 
+        imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         std::array<VkWriteDescriptorSet, 2> descriptorWritesLocal;
         descriptorWritesLocal[0] = {
@@ -1030,7 +1077,7 @@ void Engine::createDescriptorSets() {
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pImageInfo = nullptr,
             .pBufferInfo = &camInfo,
-            .pTexelBufferView = nullptr
+            .pTexelBufferView = nullptr,
         };
 
         descriptorWritesLocal[1] = {
@@ -1043,21 +1090,24 @@ void Engine::createDescriptorSets() {
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo = &imgInfo,
             .pBufferInfo = nullptr,
-            .pTexelBufferView = nullptr
+            .pTexelBufferView = nullptr,
         };
 
         vkUpdateDescriptorSets(device, descriptorWritesLocal.size(), descriptorWritesLocal.data(), 0, nullptr);
     }
 }
 
-void Engine::createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pipelineLayout,
-                                     const char* shaderPath,
-                                     uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges,
-                                     uint32_t setLayoutCount, VkDescriptorSetLayout* pSetLayouts) {
+void Engine::createComputePipeline(VkPipeline &pipeline,
+                                    VkPipelineLayout &pipelineLayout,
+                                    const char *shaderPath,
+                                    uint32_t pushConstantRangeCount,
+                                    VkPushConstantRange *pPushConstantRanges,
+                                    uint32_t setLayoutCount,
+                                    VkDescriptorSetLayout *pSetLayouts) {
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.pushConstantRangeCount = pushConstantRangeCount; 
+    pipelineLayoutInfo.pushConstantRangeCount = pushConstantRangeCount;
     pipelineLayoutInfo.pPushConstantRanges = pPushConstantRanges;
     pipelineLayoutInfo.setLayoutCount = setLayoutCount;
     pipelineLayoutInfo.pSetLayouts = pSetLayouts;
@@ -1080,24 +1130,27 @@ void Engine::createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pipel
 }
 
 // void Renderer::createComputePipeline(const char* shaderPath,
-//                                      uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges,
-//                                      uint32_t setLayoutCount, VkDescriptorSetLayout* pSetLayouts) {
+//                                      uint32_t pushConstantRangeCount,
+//                                      VkPushConstantRange*
+//                                      pPushConstantRanges, uint32_t
+//                                      setLayoutCount, VkDescriptorSetLayout*
+//                                      pSetLayouts) {
 //     VkPushConstantRange push{};
 //     push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 //     push.offset = 0;
 //     push.size = sizeof(int);
-    
+
 //     std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
 
 //     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 //     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-//     pipelineLayoutInfo.pushConstantRangeCount = 1; 
+//     pipelineLayoutInfo.pushConstantRangeCount = 1;
 //     pipelineLayoutInfo.pPushConstantRanges = &push;
 //     pipelineLayoutInfo.setLayoutCount = setLayout.size();
 //     pipelineLayoutInfo.pSetLayouts = setLayout.data();
 //     vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &computePipelineLayout);
 
-//     VkShaderModule renderShaderModule = createShader(device, "../shader/spv/proj.spv");
+//     VkShaderModule renderShaderModule = createShader(device, "../shader/spv/proj.spv"); 
 //     VkPipelineShaderStageCreateInfo renderShaderInfo{};
 //     renderShaderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 //     renderShaderInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1125,9 +1178,9 @@ uint32_t Engine::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags prope
     throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-void Engine::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                            VkMemoryPropertyFlags properties,
-                            VkBuffer &buffer, VkDeviceMemory &bufferMemory) {
+void Engine::createBuffer(VkDeviceSize size, 
+                        VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                        VkBuffer &buffer, VkDeviceMemory &bufferMemory) {
 
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1148,10 +1201,10 @@ void Engine::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     vkBindBufferMemory(device, buffer, bufferMemory, 0);
 }
 
-void Engine::createImage(uint32_t width, uint32_t height,
-                           VkFormat imageFormat, VkImageUsageFlags imageUsage,
-                           VkMemoryPropertyFlags properties,
-                           VkImage &image, VkDeviceMemory &imageMemory) {
+void Engine::createImage(uint32_t width, uint32_t height, VkFormat imageFormat,
+                    VkImageUsageFlags imageUsage,
+                    VkMemoryPropertyFlags properties,
+                    VkImage &image, VkDeviceMemory &imageMemory) {
 
     VkImageCreateInfo imgCreateInfo{
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1162,7 +1215,7 @@ void Engine::createImage(uint32_t width, uint32_t height,
         .extent = {.width = width, .height = height, .depth = 1},
         .mipLevels = 1,
         .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT, 
+        .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = imageUsage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -1206,15 +1259,13 @@ void Engine::createImageView(VkFormat format, VkImage &image, VkImageView &image
 }
 
 template <typename UBO>
-void Engine::createUniformBuffer(VkBuffer &buffer,
-                                   VkDeviceMemory &bufferMemory,
-                                   void* &pData) {
+void Engine::createUniformBuffer(VkBuffer &buffer, VkDeviceMemory &bufferMemory, void *&pData) {
 
     VkDeviceSize size = sizeof(UBO);
     createBuffer(size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 buffer, bufferMemory);
-        
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        buffer, bufferMemory);
+
     // persistent mapping
     vkMapMemory(device, bufferMemory, 0, size, 0, &pData);
 }
@@ -1224,36 +1275,33 @@ void Engine::createStorageBuffer(size_t num_elements, VkBuffer &buffer, VkDevice
     VkDeviceSize size = sizeof(T) * num_elements;
 
     createBuffer(size,
-                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                 buffer, bufferMemory);
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        buffer, bufferMemory);
 }
 
 template <typename T>
-void Engine::createStorageBuffer(std::vector<T> &srcBuffer,
-                                   VkBuffer &buffer, 
-                                   VkDeviceMemory &bufferMemory) {
+void Engine::createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer, VkDeviceMemory &bufferMemory) {
 
     VkDeviceSize size = sizeof(T) * srcBuffer.size();
 
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
-    void* pData;
+    void *pData;
 
-    createBuffer(size,
-                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 stagingBuffer, stagingBufferMemory);
-    
+    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
+
     vkMapMemory(device, stagingBufferMemory, 0, size, 0, &pData);
     memcpy(pData, srcBuffer.data(), size);
     vkUnmapMemory(device, stagingBufferMemory);
 
     createBuffer(size,
-                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                 buffer, bufferMemory);
-    
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        buffer, bufferMemory);
+
     VkBufferCopy region{};
     region.size = size;
 
@@ -1274,7 +1322,7 @@ VkCommandBuffer Engine::beginSingleTimeCommands() {
 
     VkCommandBuffer cmdbuf;
     vkAllocateCommandBuffers(device, &allocInfo, &cmdbuf);
-    
+
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1292,14 +1340,13 @@ void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     submitInfo.pCommandBuffers = &commandBuffer;
 
     vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-
-    vkDeviceWaitIdle(device);
+    vkQueueWaitIdle(graphicsQueue);
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 };
 
-void Engine::updateCameraUBO() {
-    float moveSpeed = 0.05f;
-    float rotSpeed = 1.0f;
+void Engine::updateCameraUBO(float deltaTime) {
+    float moveSpeed = 3.0f * deltaTime;
+    float rotSpeed = 60.0f * deltaTime;
 
     if (glfwGetKey(pWindow, GLFW_KEY_W) == GLFW_PRESS)
         cameraPos += moveSpeed * cameraFront;
@@ -1311,16 +1358,18 @@ void Engine::updateCameraUBO() {
         cameraPos += glm::normalize(glm::cross(cameraFront, cameraUp)) * moveSpeed;
 
     if (glfwGetKey(pWindow, GLFW_KEY_UP) == GLFW_PRESS)
-        pitch += rotSpeed;
-    if (glfwGetKey(pWindow, GLFW_KEY_DOWN) == GLFW_PRESS)
         pitch -= rotSpeed;
+    if (glfwGetKey(pWindow, GLFW_KEY_DOWN) == GLFW_PRESS)
+        pitch += rotSpeed;
     if (glfwGetKey(pWindow, GLFW_KEY_LEFT) == GLFW_PRESS)
-        yaw -= rotSpeed;
-    if (glfwGetKey(pWindow, GLFW_KEY_RIGHT) == GLFW_PRESS)
         yaw += rotSpeed;
+    if (glfwGetKey(pWindow, GLFW_KEY_RIGHT) == GLFW_PRESS)
+        yaw -= rotSpeed;
 
-    if (pitch > 89.0f) pitch = 89.0f;
-    if (pitch < -89.0f) pitch = -89.0f;
+    if (pitch > 89.0f)
+        pitch = 89.0f;
+    if (pitch < -89.0f)
+        pitch = -89.0f;
 
     glm::vec3 front;
     front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
@@ -1331,11 +1380,12 @@ void Engine::updateCameraUBO() {
     updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
     memcpy(cameraBufferMapped[currentFrame], &camUBO, sizeof(CameraUBO));
 }
-void Engine::setCameraFromColmap(const Image& image) {
+
+void Engine::setCameraFromColmap(const Image &image) {
     glm::quat q(image.q[0], image.q[1], image.q[2], image.q[3]);
     glm::mat3 R_cw = glm::mat3_cast(q);
     glm::vec3 t_cw(image.t[0], image.t[1], image.t[2]);
-    
+
     // camera pose C = -R_cw^T * t_cw
     glm::mat3 R_wc = glm::transpose(R_cw);
     cameraPos = -R_wc * t_cw;
@@ -1344,17 +1394,18 @@ void Engine::setCameraFromColmap(const Image& image) {
     // World space Up vector of the camera is R_wc * (0, -1, 0)
     cameraFront = glm::normalize(R_wc * glm::vec3(0.0f, 0.0f, 1.0f));
     cameraUp = glm::normalize(R_wc * glm::vec3(0.0f, -1.0f, 0.0f));
-    
+
+    // 시야 확보를 위해 카메라를 살짝 뒤로 뺌
+    cameraPos -= cameraFront * 2.0f;
+
     pitch = glm::degrees(asin(cameraFront.y));
     yaw = glm::degrees(atan2(cameraFront.z, cameraFront.x));
 
     // Force update immediately
     updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
-    for(int i=0; i<MAX_FRAME_IN_FLIGHT; ++i) {
+    for (int i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
         memcpy(cameraBufferMapped[i], &camUBO, sizeof(CameraUBO));
     }
 }
 
-}
-
-
+} // namespace Core

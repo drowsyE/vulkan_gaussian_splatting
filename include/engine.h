@@ -153,7 +153,7 @@ private:
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     VkCommandBuffer beginSingleTimeCommands();
     void endSingleTimeCommands(VkCommandBuffer commandBuffer);
-    void updateCameraUBO();
+    void updateCameraUBO(float deltaTime);
 };
 
 }

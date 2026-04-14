@@ -10,7 +10,7 @@ void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float wi
     // 2. Projection Matrix (원근감)
     // 3DGS 논문 기준으로는 fovX, fovY를 통해 계산된 투영 행렬을 사용합니다.
     float fovY = glm::radians(45.0f);
-    ubo.proj = glm::perspective(fovY, width / height, 0.1f, 1000.0f);
+    ubo.proj = glm::perspective(fovY, width / height, 0.1f, 10000.0f);
     
     // Vulkan은 OpenGL과 달리 Y축이 반대이므로 보정 (필요 시)
     ubo.proj[1][1] *= -1;

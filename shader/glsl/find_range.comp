@@ -17,6 +17,10 @@ layout(set = 0, binding = 5) buffer TileRanges {
     TileRange ranges[];
 };
 
+layout(push_constant) uniform PushConstant {
+    uint num_tiles;
+} push;
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 // i번째 키와 i-1번째 키를 비교하여 타일이 바뀌는 경계를 찾음
@@ -26,11 +30,13 @@ void main() {
 
     uint currentKey = keys[id];
     uint currentTile = uint(currentKey >> 16);
+    currentTile = min(currentTile, push.num_tiles - 1);
 
     if (id == 0) {
         ranges[currentTile].start = 0;
     } else {
         uint prevTile = uint(keys[id - 1] >> 16);
+        prevTile = min(prevTile, push.num_tiles - 1);
         if (currentTile != prevTile) {
             ranges[prevTile].end = id;      // 이전 타일 종료
             ranges[currentTile].start = id; // 현재 타일 시작
