@@ -6,154 +6,166 @@
 
 #include "vk_radix_sort.h"
 
-#include "gs_core.h"
-#include "engine_utils.h"
 #include "camera.h"
+#include "engine_utils.h"
+#include "gs_core.h"
 
 namespace Core {
 
 class Engine {
 
 public:
-    Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points);
-    Engine();
-    ~Engine();
+  Engine(uint64_t src_width, uint64_t src_height, float scale,
+         std::vector<Core::Point> &points);
+  Engine();
+  ~Engine();
 
-    void run();
-    void setCameraFromColmap(const Image& image);
+  void run();
+  void setCameraFromColmap(const Image &image);
 
 private:
+  static constexpr int MAX_FRAME_IN_FLIGHT = 2;
+  int currentFrame = 0;
 
-    uint32_t render_width, render_height;
-    uint32_t totalGaussians;
-    uint32_t maxGaussians; // capacity
+  uint32_t render_width, render_height;
+  uint32_t totalGaussians;
+  uint32_t maxGaussians; // capacity
 
-    VkDebugUtilsMessengerEXT debugMessenger;
+  VkDebugUtilsMessengerEXT debugMessenger;
 
-    GLFWwindow* pWindow;
-    VkInstance instance;
-    VkSurfaceKHR surface;
-    VkPhysicalDevice physDev;
-    VkDevice device;
-    uint32_t graphicsAndComputeFamilyIndex;
-    uint32_t presentFamilyIndex;
-    VkQueue graphicsQueue;
-    VkQueue computeQueue;
-    VkQueue presentQueue;
-    VkSwapchainKHR swapchain;
-    std::vector<VkImage> swapchainImages;
-    std::vector<VkImageView> swapchainImageViews;
-    VkFormat swapchainImageFormat;
-    VkExtent2D swapchainImageExtent;
+  GLFWwindow *pWindow;
+  VkInstance instance;
+  VkSurfaceKHR surface;
+  VkPhysicalDevice physDev;
+  VkDevice device;
+  uint32_t graphicsAndComputeFamilyIndex;
+  uint32_t presentFamilyIndex;
+  VkQueue graphicsQueue;
+  VkQueue computeQueue;
+  VkQueue presentQueue;
+  VkSwapchainKHR swapchain;
+  std::vector<VkImage> swapchainImages;
+  std::vector<VkImageView> swapchainImageViews;
+  VkFormat swapchainImageFormat;
+  VkExtent2D swapchainImageExtent;
 
-    std::vector<VkSemaphore> computeFinishedSemaphore;
-    std::vector<VkSemaphore> imageAvailableSemaphore;
-    std::vector<VkSemaphore> renderFinishedSemaphore;
-    std::vector<VkFence> computeInFlightFences;
-    std::vector<VkFence> graphicsInFlightFences;
+  std::vector<VkSemaphore> computeFinishedSemaphore;
+  std::vector<VkSemaphore> imageAvailableSemaphore;
+  std::vector<VkSemaphore> renderFinishedSemaphore;
+  std::vector<VkSemaphore> projectionFinishedSemaphores;
+  std::vector<VkFence> computeInFlightFences;
+  std::vector<VkFence> graphicsInFlightFences;
 
-    VkCommandPool commandPool;
-    std::vector<VkCommandBuffer> computeCommandBuffers;
-    std::vector<VkCommandBuffer> graphicsCommandBuffers;
+  VkCommandPool commandPool;
+  std::vector<VkCommandBuffer> computeCommandBuffers;
+  std::vector<VkCommandBuffer> computeCommandBuffers2;
+  std::vector<VkCommandBuffer> graphicsCommandBuffers;
 
-    uint32_t KVCapacity;
-    uint32_t counter;
+  uint32_t KVCapacity;
+  uint32_t counter;
 
-    VrdxSorter sorter;
+  VrdxSorter sorter;
 
-    VkBuffer gaussianBuffer;
-    VkBuffer projectedGaussianBuffer;
-    VkBuffer keyBuffer;
-    VkBuffer valueBuffer;
-    VkBuffer pingpongBuffer;
-    VkBuffer counterBuffer;
-    VkBuffer indirectArgsBuffer;
+  VkBuffer gaussianBuffer;
+  VkBuffer projectedGaussianBuffer;
+  VkBuffer keyBuffer;
+  VkBuffer valueBuffer;
+  VkBuffer pingpongBuffer;
+  VkBuffer counterBuffer;
+  VkBuffer indirectArgsBuffer;
 
-    VkDeviceMemory gaussianBufferMemory;
-    VkDeviceMemory projectedGaussianBufferMemory;
-    VkDeviceMemory keyBufferMemory;
-    VkDeviceMemory valueBufferMemory;
-    VkDeviceMemory pingpongBufferMemory;
-    VkDeviceMemory counterBufferMemory;
-    VkDeviceMemory indirectArgsBufferMemory;
+  VkDeviceMemory gaussianBufferMemory;
+  VkDeviceMemory projectedGaussianBufferMemory;
+  VkDeviceMemory keyBufferMemory;
+  VkDeviceMemory valueBufferMemory;
+  VkDeviceMemory pingpongBufferMemory;
+  VkDeviceMemory counterBufferMemory;
+  VkDeviceMemory indirectArgsBufferMemory;
 
-    uint32_t num_tiles;
-    VkBuffer tileRangeBuffer;
-    VkDeviceMemory tileRangeBufferMemory;
+  uint32_t num_tiles;
+  VkBuffer tileRangeBuffer;
+  VkDeviceMemory tileRangeBufferMemory;
 
-    CameraUBO camUBO;
-    glm::vec3 cameraPos{0.0f, 0.0f, 5.0f};
-    glm::vec3 cameraFront{0.0f, 0.0f, -1.0f};
-    glm::vec3 cameraUp{0.0f, 1.0f, 0.0f};
-    float yaw{-90.0f};
-    float pitch{0.0f};
-    std::vector<VkBuffer> cameraBuffers; // need to be resized
-    std::vector<VkDeviceMemory> cameraBufferMemory;
-    std::vector<void*> cameraBufferMapped;
+  CameraUBO camUBO;
+  glm::vec3 cameraPos{0.0f, 0.0f, 5.0f};
+  glm::vec3 cameraFront{0.0f, 0.0f, -1.0f};
+  glm::vec3 cameraUp{0.0f, 1.0f, 0.0f};
+  float yaw{-90.0f};
+  float pitch{0.0f};
+  std::vector<VkBuffer> cameraBuffers; // need to be resized
+  std::vector<VkDeviceMemory> cameraBufferMemory;
+  std::vector<void *> cameraBufferMapped;
 
-    std::vector<VkImage> offscreenImages;
-    std::vector<VkImageView> offscreenImageViews;
-    std::vector<VkDeviceMemory> imageMemory;
+  std::vector<VkImage> offscreenImages;
+  std::vector<VkImageView> offscreenImageViews;
+  std::vector<VkDeviceMemory> imageMemory;
 
-    VkDescriptorPool descriptorPool;
-    VkDescriptorSetLayout globalDescriptorSetLayout; // gaussian buffer
-    VkDescriptorSetLayout localDescriptorSetLayout; // camera ubo, images
-    VkDescriptorSet globalDescriptorSets;
-    std::vector<VkDescriptorSet> localDescriptorSets;
+  VkDescriptorPool descriptorPool;
+  VkDescriptorSetLayout globalDescriptorSetLayout; // gaussian buffer
+  VkDescriptorSetLayout localDescriptorSetLayout;  // camera ubo, images
+  VkDescriptorSet globalDescriptorSets;
+  std::vector<VkDescriptorSet> localDescriptorSets;
 
-    VkPipelineLayout projComputePipelineLayout;
-    VkPipeline projComputePipeline;
-    VkPipelineLayout rangeComputePipelineLayout;
-    VkPipeline rangeComputePipeline;
-    VkPipelineLayout rasterComputePipelineLayout;
-    VkPipeline rasterComputePipeline;
-    VkPipelineLayout argpassComputePipelineLayout;
-    VkPipeline argpassComputePipeline;
+  VkPipelineLayout projComputePipelineLayout;
+  VkPipeline projComputePipeline;
+  VkPipelineLayout rangeComputePipelineLayout;
+  VkPipeline rangeComputePipeline;
+  VkPipelineLayout rasterComputePipelineLayout;
+  VkPipeline rasterComputePipeline;
+  VkPipelineLayout argpassComputePipelineLayout;
+  VkPipeline argpassComputePipeline;
 
-    void drawFrame();
+  void drawFrame();
 
-    void initWindow();
-    void createInstance();
-    void setupDebugMessenger();
-    void pickPhysicalDevice();
-    void createLogicalDevice();
-    void createSwapchain();
-    void createSwapchainImageViews();
-    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                      VkMemoryPropertyFlags properties,
-                      VkBuffer &buffer, VkDeviceMemory &bufferMemory);
-    template <typename UBO>
-    void createUniformBuffer(VkBuffer &buffer,
-                             VkDeviceMemory &bufferMemory,
-                             void* &pData);
+  void initWindow();
+  void createInstance();
+  void setupDebugMessenger();
+  void pickPhysicalDevice();
+  void createLogicalDevice();
+  void createSwapchain();
+  void createSwapchainImageViews();
+  void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                    VkMemoryPropertyFlags properties, VkBuffer &buffer,
+                    VkDeviceMemory &bufferMemory);
+  template <typename UBO>
+  void createUniformBuffer(VkBuffer &buffer, VkDeviceMemory &bufferMemory,
+                           void *&pData);
 
-    template <typename T>
-    void createStorageBuffer(size_t num_elements, VkBuffer &buffer, VkDeviceMemory &bufferMemory);
+  template <typename T>
+  void createStorageBuffer(size_t num_elements, VkBuffer &buffer,
+                           VkDeviceMemory &bufferMemory);
 
-    template <typename T>
-    void createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer, VkDeviceMemory &bufferMemory);
-    
-    void createImage(uint32_t width, uint32_t height,
-                     VkFormat imageFormat, VkImageUsageFlags imageUsage,
-                     VkMemoryPropertyFlags properties, VkImage &image,
-                     VkDeviceMemory &imageMemory);
-    void createImageView(VkFormat format, VkImage &image, VkImageView &imageView);
-    void createSorterAndBuffer();
-    void createDescriptorSetLayouts();
-    void createDescriptorPool();
-    void createDescriptorSets();
-    void createComputePipeline(VkPipeline &pipeline, VkPipelineLayout &pipelineLayout,
-                               const char* shaderPath,
-                               uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges,
-                               uint32_t setLayoutCount, VkDescriptorSetLayout* pSetLayouts);
-    void createCommandPool();
-    void createCommandBuffers();
-    void createSyncObjects();
+  template <typename T>
+  void createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer,
+                           VkDeviceMemory &bufferMemory);
 
-    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
-    VkCommandBuffer beginSingleTimeCommands();
-    void endSingleTimeCommands(VkCommandBuffer commandBuffer);
-    void updateCameraUBO(float deltaTime);
+  void createImage(uint32_t width, uint32_t height, VkFormat imageFormat,
+                   VkImageUsageFlags imageUsage,
+                   VkMemoryPropertyFlags properties, VkImage &image,
+                   VkDeviceMemory &imageMemory);
+  void createImageView(VkFormat format, VkImage &image, VkImageView &imageView);
+  void createSorterAndBuffer();
+  void createDescriptorSetLayouts();
+  void createDescriptorPool();
+  void createDescriptorSets();
+  void createComputePipeline(VkPipeline &pipeline,
+                             VkPipelineLayout &pipelineLayout,
+                             const char *shaderPath,
+                             uint32_t pushConstantRangeCount,
+                             VkPushConstantRange *pPushConstantRanges,
+                             uint32_t setLayoutCount,
+                             VkDescriptorSetLayout *pSetLayouts);
+  void createCommandPool();
+  void createCommandBuffers();
+  void verifyRadixSort(bool preSort = false);
+  void createSyncObjects();
+
+  uint32_t findMemoryType(uint32_t typeFilter,
+                          VkMemoryPropertyFlags properties);
+  VkCommandBuffer beginSingleTimeCommands();
+  void endSingleTimeCommands(VkCommandBuffer commandBuffer);
+  void updateCameraUBO(float deltaTime);
+  void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 };
 
-}
+} // namespace Core

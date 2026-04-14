@@ -174,7 +174,11 @@ void main() {
         for (int tx = min_tx; tx <= max_tx; ++tx) {
             uint tileID = tx + ty * n_cols;
             
-            uint key = (tileID << 16) | ((depthInt >> 16) & 0xFFFF);
+            // Closest points have smaller depthInt, so they get smaller keys.
+            // Ascending sort will place closer points first (Front-to-Back order),
+            // which exactly matches the Front-to-Back blending in raster.comp.
+            uint depthKey = (depthInt >> 16) & 0xFFFF;
+            uint key = (tileID << 16) | depthKey;
             
             uint write_idx = atomicAdd(kvCount, 1);
             if (write_idx >= push.kvCapacity) return;
