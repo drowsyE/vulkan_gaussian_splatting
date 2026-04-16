@@ -109,7 +109,7 @@ void main() {
     // 4. 2D 공분산 도출
     mat3 WM = W * M;
     mat3x2 L = J * WM;
-    mat2 sigma_prime = L * transpose(L);
+    mat2 sigma_prime = L * transpose(L); // J W Sigma W^t J^t
 
     // 5. Anti-aliasing
     sigma_prime[0][0] += 0.3;
@@ -141,7 +141,7 @@ void main() {
         return;
     }
 
-    // 결과를 전용 SSBO에 저장 (실제 데이터 사용)
+    // 결과를 전용 SSBO에 저장
     projectedGaussians[idx].pos2d = screen_pos;
     projectedGaussians[idx].conics = conics;
     projectedGaussians[idx].opacity = g.scaleOpacity.w;
@@ -174,9 +174,6 @@ void main() {
         for (int tx = min_tx; tx <= max_tx; ++tx) {
             uint tileID = tx + ty * n_cols;
             
-            // Closest points have smaller depthInt, so they get smaller keys.
-            // Ascending sort will place closer points first (Front-to-Back order),
-            // which exactly matches the Front-to-Back blending in raster.comp.
             uint depthKey = (depthInt >> 16) & 0xFFFF;
             uint key = (tileID << 16) | depthKey;
             

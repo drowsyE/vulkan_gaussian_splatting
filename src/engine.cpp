@@ -65,19 +65,16 @@ void Engine::drawFrame() {
     VkCommandBuffer graphicsCmdbuf = graphicsCommandBuffers[currentFrame];
 
     // --- Synchronization & Resets ---
-    vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE,
-                                    UINT64_MAX);
+    vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &computeInFlightFences[currentFrame]);
-    vkWaitForFences(device, 1, &graphicsInFlightFences[currentFrame], VK_TRUE,
-                                    UINT64_MAX);
+    vkWaitForFences(device, 1, &graphicsInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &graphicsInFlightFences[currentFrame]);
 
     vkResetCommandBuffer(cmdbuf, 0);
     vkResetCommandBuffer(cmdbuf2, 0);
     vkResetCommandBuffer(graphicsCmdbuf, 0);
 
-    VkCommandBufferBeginInfo beginInfo{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
                                                                                      1};
 
@@ -91,41 +88,30 @@ void Engine::drawFrame() {
 
     VkMemoryBarrier initBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     initBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    initBarrier.dstAccessMask =
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &initBarrier,
-                                             0, nullptr, 0, nullptr);
+    initBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &initBarrier, 0, nullptr, 0, nullptr);
 
     uint32_t pushData[2] = {totalGaussians, KVCapacity};
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                        projComputePipeline);
-    vkCmdPushConstants(cmdbuf, projComputePipelineLayout,
-                                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData),
-                                         pushData);
-    VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets,
-                                                                                    localDescriptorSets[currentFrame]};
-    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                                    projComputePipelineLayout, 0, 2, bindDescriptorSets,
-                                                    0, nullptr);
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
+    vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), pushData);
+    VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
+    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
     vkCmdDispatch(cmdbuf, (totalGaussians + 255) / 256, 1, 1);
 
     VkMemoryBarrier midPassABarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     midPassABarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    midPassABarrier.dstAccessMask =
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                                             &midPassABarrier, 0, nullptr, 0, nullptr);
+    midPassABarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmdbuf,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &midPassABarrier, 0, nullptr, 0, nullptr);
 
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                        argpassComputePipeline);
-    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                                    argpassComputePipelineLayout, 0, 2,
-                                                    bindDescriptorSets, 0, nullptr);
-    vkCmdPushConstants(cmdbuf, argpassComputePipelineLayout,
-                                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t),
-                                         &KVCapacity);
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipeline);
+    vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+    vkCmdPushConstants(cmdbuf, argpassComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &KVCapacity);
     vkCmdDispatch(cmdbuf, 1, 1, 1);
     vkEndCommandBuffer(cmdbuf);
 
@@ -138,33 +124,24 @@ void Engine::drawFrame() {
 
     // --- Pass B (Sort, Range, Raster) ---
     vkBeginCommandBuffer(cmdbuf2, &beginInfo);
-    vrdxCmdSortKeyValueIndirect(cmdbuf2, sorter, KVCapacity, counterBuffer, 0,
-                                                            keyBuffer, 0, valueBuffer, 0, pingpongBuffer, 0,
-                                                            VK_NULL_HANDLE, 0);
+    vrdxCmdSortKeyValueIndirect(cmdbuf2, sorter, KVCapacity,
+                                counterBuffer, 0, keyBuffer, 0,
+                                valueBuffer, 0, pingpongBuffer, 0, VK_NULL_HANDLE, 0);
 
     VkMemoryBarrier postSortBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    postSortBarrier.srcAccessMask =
-            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    postSortBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                                                    VK_ACCESS_SHADER_WRITE_BIT |
-                                                                    VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-    vkCmdPipelineBarrier(cmdbuf2, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                                                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                                             0, 1, &postSortBarrier, 0, nullptr, 0, nullptr);
+    postSortBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    postSortBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    vkCmdPipelineBarrier(cmdbuf2,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                        0, 1, &postSortBarrier, 0, nullptr, 0, nullptr);
 
-    vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                                    rangeComputePipelineLayout, 0, 1,
-                                                    &globalDescriptorSets, 0, nullptr);
-    vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                        rangeComputePipeline);
-    vkCmdPushConstants(cmdbuf2, rangeComputePipelineLayout,
-                                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t),
-                                         &num_tiles);
+    vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1, &globalDescriptorSets, 0, nullptr);
+    vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,rangeComputePipeline);
+    vkCmdPushConstants(cmdbuf2, rangeComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &num_tiles);
     vkCmdDispatchIndirect(cmdbuf2, indirectArgsBuffer, 0);
 
-    VkImageMemoryBarrier imageToGeneralBarrier{
-            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    VkImageMemoryBarrier imageToGeneralBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     imageToGeneralBarrier.image = offscreenImages[currentFrame];
     imageToGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageToGeneralBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -174,25 +151,19 @@ void Engine::drawFrame() {
 
     VkMemoryBarrier postRangeBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     postRangeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    postRangeBarrier.dstAccessMask =
-            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmdbuf2, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                                             &postRangeBarrier, 0, nullptr, 1,
-                                             &imageToGeneralBarrier);
+    postRangeBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmdbuf2,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, 1, &postRangeBarrier, 0, nullptr, 1, &imageToGeneralBarrier);
 
-    vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                        rasterComputePipeline);
-    vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                                    rasterComputePipelineLayout, 0, 2, bindDescriptorSets,
-                                                    0, nullptr);
-    vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16,
-                                1);
+    vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
+    vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+    vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
     vkEndCommandBuffer(cmdbuf2);
 
     VkSubmitInfo submitInfoB{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    VkPipelineStageFlags computeWaitStages[] = {
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT};
+    VkPipelineStageFlags computeWaitStages[] = {VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT};
     submitInfoB.commandBufferCount = 1;
     submitInfoB.pCommandBuffers = &cmdbuf2;
     submitInfoB.waitSemaphoreCount = 1;
@@ -200,8 +171,7 @@ void Engine::drawFrame() {
     submitInfoB.pWaitDstStageMask = computeWaitStages;
     submitInfoB.signalSemaphoreCount = 1;
     submitInfoB.pSignalSemaphores = &computeFinishedSemaphore[currentFrame];
-    vkQueueSubmit(computeQueue, 1, &submitInfoB,
-                                computeInFlightFences[currentFrame]);
+    vkQueueSubmit(computeQueue, 1, &submitInfoB, computeInFlightFences[currentFrame]);
 
 #ifndef NDEBUG
     static int verifyCounter = 0;
@@ -296,6 +266,8 @@ void Engine::drawFrame() {
 
     currentFrame = (currentFrame + 1) % MAX_FRAME_IN_FLIGHT;
 }
+
+void Engine::train() {}
 
 Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points) {
 
@@ -786,7 +758,7 @@ void Engine::createSorterAndBuffer() {
 									.pipelineCache = VK_NULL_HANDLE};
     vrdxCreateSorter(&sorterInfo, &sorter);
 
-    KVCapacity = maxGaussians * 64; // static pre-allocation pool (increased to fix blocks)
+    KVCapacity = maxGaussians << 6; // static pre-allocation pool (increased to fix blocks)
 
     // VkDeviceSize keyBufferSize = totalKVCount * sizeof(uint64_t);
     // VkDeviceSize valueBufferSize = totalKVCount * sizeof(uint32_t);

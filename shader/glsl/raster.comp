@@ -101,6 +101,7 @@ void main() {
 
         barrier();
 
+        // front-to-back compositing for early exit
         if (inside && T >= 0.0001) {
             uint current_chunk_size = min(BLOCK_SIZE, end - i);
             for (uint j = 0; j < current_chunk_size; j++) {

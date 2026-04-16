@@ -116,6 +116,7 @@ private:
   VkPipeline argpassComputePipeline;
 
   void drawFrame();
+  void train();
 
   void initWindow();
   void createInstance();
