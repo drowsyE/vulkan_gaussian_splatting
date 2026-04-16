@@ -24,16 +24,15 @@ bool enableValidationLayers = true;
 #endif
 
 // Function pointer for Push Descriptors
-extern "C" PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR_ptr =
-        nullptr;
+extern "C" PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR_ptr = nullptr;
 
 std::vector<const char *> validationLayer{"VK_LAYER_KHRONOS_validation"};
 
 std::vector<const char *> deviceExtensions {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
-            VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // for radix sort
+    VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // for radix sort
 #if __APPLE__
-            "VK_KHR_portability_subset"
+    "VK_KHR_portability_subset"
 #endif
 };
 
@@ -75,8 +74,7 @@ void Engine::drawFrame() {
     vkResetCommandBuffer(graphicsCmdbuf, 0);
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
-                                                                                     1};
+    VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
     // --- Pass A (Projection & Argpass) ---
     vkBeginCommandBuffer(cmdbuf, &beginInfo);
