@@ -102,9 +102,10 @@ void main() {
     
     // Scale 적용 (M = R * S)
     mat3 M = R;
-    M[0] *= g.scaleOpacity.x;
-    M[1] *= g.scaleOpacity.y;
-    M[2] *= g.scaleOpacity.z;
+    vec3 s = exp(g.scaleOpacity.xyz); // 로그 스케일을 실제 스케일로 변환
+    M[0] *= s.x;
+    M[1] *= s.y;
+    M[2] *= s.z;
 
     // 4. 2D 공분산 도출
     mat3 WM = W * M;

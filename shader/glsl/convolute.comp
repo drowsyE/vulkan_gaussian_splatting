@@ -1,0 +1,81 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PushConstants {
+    int isVertical; // 0: Horizontal, 1: Vertical
+} p;
+
+// 이미지 바인딩
+layout(set = 1, binding = 1, rgba8) uniform readonly image2D outImage;      // Rendered (x)
+layout(set = 1, binding = 2, rgba8) uniform readonly image2D gtImage;       // Ground Truth (y)
+layout(set = 1, binding = 4, rgba32f) uniform image2D curSSIMStats; // Final (mu_x, var_x, cov_xy, T)
+layout(set = 1, binding = 5, rg32f) uniform writeonly image2D gtSSIMStats;   // Final (mu_y, var_y)
+layout(set = 1, binding = 6, rgba32f) uniform image2D tempSSIMStats;        // Intermediate (E[x], E[x^2], E[xy], E[y])
+layout(set = 1, binding = 7, r32f) uniform image2D tempSSIMStats2;         // Intermediate (E[y^2])
+
+const float kernel[11] = {0.0020, 0.0086, 0.0270, 0.0606, 0.0960, 0.1126, 0.0960, 0.0606, 0.0270, 0.0086, 0.0020};
+const vec3 lw = vec3(0.299, 0.587, 0.114); // for luminance
+
+void main() {
+    ivec2 curr = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    if (curr.x >= size.x || curr.y >= size.y) return;
+
+    if (p.isVertical == 0) {
+        // --- PASS 1: Horizontal Blur ---
+        vec4 sum_h1 = vec4(0.0); // E[x], E[x^2], E[xy], E[y]
+        float sum_h2 = 0.0;      // E[y^2]
+
+        for (int i = -5; i <= 5; i++) {
+            ivec2 pos = clamp(curr + ivec2(i, 0), ivec2(0), size - 1);
+            float w = kernel[i + 5];
+
+            vec3 color_x = imageLoad(outImage, pos).rgb;
+            vec3 color_y = imageLoad(gtImage, pos).rgb;
+            
+            // Luminance 변환 (채널별 가중 평균 0.299R + 0.587G + 0.114B를 써도 좋지만, 여기선 단순 평균)
+            float x = dot(color_x, lw);
+            float y = dot(color_y, lw);
+
+            sum_h1.x += x * w;          // E[x]
+            sum_h1.y += (x * x) * w;    // E[x^2]
+            sum_h1.z += (x * y) * w;    // E[xy]
+            sum_h1.w += y * w;          // E[y]
+            sum_h2   += (y * y) * w;    // E[y^2]
+        }
+        imageStore(tempSSIMStats, curr, sum_h1);
+        imageStore(tempSSIMStats2, curr, vec4(sum_h2, 0, 0, 1.0));
+
+    } else {
+        // --- PASS 2: Vertical Blur ---
+        vec4 e_final1 = vec4(0.0);
+        float e_y2 = 0.0;
+
+        for (int i = -5; i <= 5; i++) {
+            ivec2 pos = clamp(curr + ivec2(0, i), ivec2(0), size - 1);
+            float w = kernel[i + 5];
+            
+            e_final1 += imageLoad(tempSSIMStats, pos) * w;
+            e_y2     += imageLoad(tempSSIMStats2, pos).r * w;
+        }
+
+        float mu_x   = e_final1.x;
+        float e_x2   = e_final1.y;
+        float e_xy   = e_final1.z;
+        float mu_y   = e_final1.w;
+        float e_y2_f = e_y2;
+
+        // 분산 및 공분산 계산
+        // var = E[X^2] - (E[X])^2
+        float var_x  = max(0.0, e_x2 - (mu_x * mu_x));
+        float var_y  = max(0.0, e_y2_f - (mu_y * mu_y));
+        float cov_xy = e_xy - (mu_x * mu_y);
+
+        // 이전 Pass에서 보관했을 수도 있는 투과도 T 로드 (필요 없다면 1.0)
+        float T_last = imageLoad(curSSIMStats, curr).a;
+
+        // 최종 저장: Backward Pass에서 읽기 편하게 배치
+        imageStore(curSSIMStats, curr, vec4(mu_x, var_x, cov_xy, T_last));
+        imageStore(gtSSIMStats, curr, vec4(mu_y, var_y, 0, 0));
+    }
+}

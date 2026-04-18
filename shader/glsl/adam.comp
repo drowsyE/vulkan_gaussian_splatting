@@ -1,0 +1,112 @@
+#version 450
+
+struct Gaussian {
+    vec3 mean;        
+    float pad1;
+    vec4 scaleOpacity; 
+    vec4 rot;          // quaternion
+    vec3 color;        // will be changed to SH coefficients soon
+    float pad;
+};
+
+// Adam의 상태를 저장하는 버퍼 (가우시안 개수만큼 할당)
+struct AdamState {
+    vec4 posR_m; // pos + color.R
+    vec4 posR_v;
+    vec4 scaleOpacity_m; // scale + opacity
+    vec4 scaleOpacity_v;
+    vec4 rot_m;
+    vec4 rot_v;
+    vec2 colorGB_m;
+    vec2 colorGB_v;
+};
+
+layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; };
+layout(set = 1, binding = 8) buffer Gradients { Gaussian grads[]; };
+layout(set = 1, binding = 10) buffer AdamMoms { AdamState moms[]; }; // m, v 저장
+
+layout(push_constant) uniform PushConstant {
+    // Adam params
+    float lr;           // Learning Rate (기본값 보통 0.00016)
+    float beta1;        // 보통 0.9
+    float beta2;        // 보통 0.999
+    float epsilon;      // 보통 1e-8
+    uint  step;         // 현재 트레이닝 스텝 (1부터 시작)
+
+    // etc
+    uint numGaussians;
+} p;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+vec4 updateAdam4(vec4 g, inout vec4 m, inout vec4 v, float m_corr, float v_corr) {
+    m = p.beta1 * m + (1.0 - p.beta1) * g;
+    v = p.beta2 * v + (1.0 - p.beta2) * (g * g);
+    vec4 m_hat = m / m_corr;
+    vec4 v_hat = v / v_corr;
+    return (p.lr * m_hat) / (sqrt(v_hat) + p.epsilon);
+}
+
+vec2 updateAdam2(vec2 g, inout vec2 m, inout vec2 v, float m_corr, float v_corr) {
+    m = p.beta1 * m + (1.0 - p.beta1) * g;
+    v = p.beta2 * v + (1.0 - p.beta2) * (g * g);
+    vec2 m_hat = m / m_corr;
+    vec2 v_hat = v / v_corr;
+    return (p.lr * m_hat) / (sqrt(v_hat) + p.epsilon);
+}
+
+void main() {
+    uint gIdx = gl_GlobalInvocationID.x;
+    if (gIdx >= p.numGaussians) return;
+
+    // 1. Bias correction factors
+    float m_corr = 1.0 - pow(p.beta1, float(p.step));
+    float v_corr = 1.0 - pow(p.beta2, float(p.step));
+
+    // 2. Load state
+    Gaussian grad = grads[gIdx];
+    AdamState mom = moms[gIdx];
+    Gaussian param = gaussians[gIdx];
+
+    // 3. Pack parameters and gradients
+    vec4 grad_posR = vec4(grad.mean, grad.color.r);
+    vec4 grad_scaleOpacity = grad.scaleOpacity;
+    vec4 grad_rot = grad.rot;
+    vec2 grad_colorGB = vec2(grad.color.g, grad.color.b);
+
+    vec4 param_posR = vec4(param.mean, param.color.r);
+    vec4 param_scaleOpacity = param.scaleOpacity;
+    vec4 param_rot = param.rot;
+    vec2 param_colorGB = vec2(param.color.g, param.color.b);
+
+    // 4. Update
+    param_posR -= updateAdam4(grad_posR, mom.posR_m, mom.posR_v, m_corr, v_corr);
+    param_scaleOpacity -= updateAdam4(grad_scaleOpacity, mom.scaleOpacity_m, mom.scaleOpacity_v, m_corr, v_corr);
+    param_rot -= updateAdam4(grad_rot, mom.rot_m, mom.rot_v, m_corr, v_corr);
+    param_colorGB -= updateAdam2(grad_colorGB, mom.colorGB_m, mom.colorGB_v, m_corr, v_corr);
+    
+    // Normalize quaternion
+    float len_rot = length(param_rot);
+    if (len_rot > 0.0) {
+        param_rot /= len_rot;
+    } else {
+        param_rot = vec4(1.0, 0.0, 0.0, 0.0);
+    }
+
+    // 5. Unpack and write back parameters
+    param.mean = param_posR.xyz;
+    param.scaleOpacity = param_scaleOpacity;
+    param.rot = param_rot;
+    param.color = vec3(param_posR.w, param_colorGB.x, param_colorGB.y);
+    
+    gaussians[gIdx] = param;
+
+    // 6. Write back moments
+    moms[gIdx] = mom;
+
+    // 7. Reset gradients for next iteration
+    grads[gIdx].mean = vec3(0.0);
+    grads[gIdx].scaleOpacity = vec4(0.0);
+    grads[gIdx].rot = vec4(0.0);
+    grads[gIdx].color = vec3(0.0);
+}

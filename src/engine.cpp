@@ -1,9 +1,15 @@
 // #define NDEBUG
 
 #define VRDX_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+
 #include "engine.h"
 #include "engine_utils.h"
 #include "gs_core.h"
+#include "adam.h"
+#include "stb_image.h"
+#include "stb_image_resize2.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -37,6 +43,7 @@ std::vector<const char *> deviceExtensions {
 };
 
 void Engine::run() {
+
     double previousTime = glfwGetTime();
     double lastFrameTime = previousTime;
     int frameCount = 0;
@@ -156,6 +163,7 @@ void Engine::drawFrame() {
                         0, 1, &postRangeBarrier, 0, nullptr, 1, &imageToGeneralBarrier);
 
     vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
+    vkCmdPushConstants(cmdbuf2, rasterComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KVCapacity), &KVCapacity);
     vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
     vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
     vkEndCommandBuffer(cmdbuf2);
@@ -265,7 +273,697 @@ void Engine::drawFrame() {
     currentFrame = (currentFrame + 1) % MAX_FRAME_IN_FLIGHT;
 }
 
-void Engine::train() {}
+// lambda -> Loss : L1 loss * (1-lambda) + SSIM loss * lambda
+void Engine::train(std::vector<Image> &images, int32_t iterations, float lr, float beta1, float beta2, float eps, float lambda) {
+
+    if (lambda < 0. || lambda > 1.) {
+        throw std::runtime_error("lambda must be between zero and one!");
+    }
+
+    // Ensure any background rendering work is finished before training starts
+    vkDeviceWaitIdle(device);
+
+
+    std::vector<std::vector<uint8_t>> gtImageCache(images.size());
+
+    VkImage outContribution; // image which records the index of lastest gaussian contributed to pixel color
+    VkImage gtImage;
+    VkImage curSSIMStats; // mean_x var_x cov_xy, T_last
+    VkImage gtSSIMStats; // mean_y var_y
+    VkImage tempSSIMStats; // mean_x var_x cov_xy mean_y
+    VkImage tempSSIMStats2; // var_y
+    
+    VkDeviceMemory outContributionMemory;
+    VkDeviceMemory gtImageMemory;
+    VkDeviceMemory curSSIMStatsMemory;
+    VkDeviceMemory gtSSIMStatsMemory;
+    VkDeviceMemory tempSSIMStatsMemory;
+    VkDeviceMemory tempSSIMStatsMemory2;
+
+    VkBuffer gaussianGradBuffer;
+    VkDeviceMemory gaussianGradBufferMemory;
+    // 16 floats (64 bytes) per gaussian: pos3d[3] pad scale[3] opacity rot[4] color[3] pad
+    createBuffer(sizeof(float) * 16 * maxGaussians, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gaussianGradBuffer, gaussianGradBufferMemory);
+
+    VkBuffer gradPos2dBuffer;
+    VkDeviceMemory gradPos2dBufferMemory;
+    createBuffer(sizeof(float) * 2 * maxGaussians, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, gradPos2dBuffer, gradPos2dBufferMemory);
+
+    VkBuffer adamMoments;
+    VkDeviceMemory adamMomentsMemory;
+    createBuffer(sizeof(AdamState) * maxGaussians, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, adamMoments, adamMomentsMemory);
+
+    createImage(render_width, render_height, VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, outContribution, outContributionMemory);
+    createImage(render_width, render_height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gtImage, gtImageMemory);
+    createImage(render_width, render_height, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, curSSIMStats, curSSIMStatsMemory);
+    createImage(render_width, render_height, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gtSSIMStats, gtSSIMStatsMemory);
+    createImage(render_width, render_height, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tempSSIMStats, tempSSIMStatsMemory);
+    createImage(render_width, render_height, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tempSSIMStats2, tempSSIMStatsMemory2);
+
+    VkImageView outContributionImageView;
+    VkImageView gtImageView;
+    VkImageView curSSIMStatsImageView;
+    VkImageView gtSSIMStatsImageView;
+    VkImageView tempSSIMStatsImageView;
+    VkImageView tempSSIMStatsImageView2;
+
+    createImageView(VK_FORMAT_R32_UINT, outContribution, outContributionImageView);
+    createImageView(VK_FORMAT_R8G8B8A8_UNORM, gtImage, gtImageView);
+    createImageView(VK_FORMAT_R32G32B32A32_SFLOAT, curSSIMStats, curSSIMStatsImageView);
+    createImageView(VK_FORMAT_R32G32_SFLOAT, gtSSIMStats, gtSSIMStatsImageView);
+    createImageView(VK_FORMAT_R32G32B32A32_SFLOAT, tempSSIMStats, tempSSIMStatsImageView);
+    createImageView(VK_FORMAT_R32_SFLOAT, tempSSIMStats2, tempSSIMStatsImageView2);
+
+    transitionImageLayout(outContribution, VK_FORMAT_R32_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    transitionImageLayout(gtImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    transitionImageLayout(curSSIMStats, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    transitionImageLayout(gtSSIMStats, VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    transitionImageLayout(tempSSIMStats, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    transitionImageLayout(tempSSIMStats2, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+
+    // Zero-initialize Adam moments to prevent NaN/Inf in the optimizer
+    {
+        VkCommandBuffer clearCmd = beginSingleTimeCommands();
+        vkCmdFillBuffer(clearCmd, adamMoments, 0, VK_WHOLE_SIZE, 0);
+        endSingleTimeCommands(clearCmd);
+    }
+
+    std::array<VkDescriptorSetLayoutBinding, 11> trainBindings{};
+
+    trainBindings[0] = { // camera buffer
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[1] = { // outimage
+        .binding = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[2] = { // gtImage
+        .binding = 2,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[3] = { // outContribution
+        .binding = 3,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[4] = { // cur ssim stats
+        .binding = 4,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[5] = { // gt ssim stats
+        .binding = 5,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[6] = { // temp ssim stats
+        .binding = 6,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[7] = { // temp ssim stats
+        .binding = 7,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[8] = { // gaussianGrad
+        .binding = 8,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[9] = { // gradPos2d
+        .binding = 9,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+    trainBindings[10] = { // adamMoments
+        .binding = 10,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr
+    };
+
+    VkDescriptorSetLayoutCreateInfo trainSetInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .bindingCount = static_cast<uint32_t>(trainBindings.size()),
+        .pBindings = trainBindings.data()
+    };
+    VkDescriptorSetLayout trainSetLayout;
+    vkCreateDescriptorSetLayout(device, &trainSetInfo, nullptr, &trainSetLayout);
+
+    VkDescriptorSet trainDescriptorSet;
+    VkDescriptorPool trainPool;
+
+    std::array<VkDescriptorPoolSize, 3> poolSizes;
+    poolSizes[0] = {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1};
+    poolSizes[1] = {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 7};
+    poolSizes[2] = {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 3};
+
+    VkDescriptorPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .maxSets = 1,
+        .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+        .pPoolSizes = poolSizes.data()
+    };
+    vkCreateDescriptorPool(device, &poolInfo, nullptr, &trainPool);
+
+    VkDescriptorSetAllocateInfo allocInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .descriptorPool = trainPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &trainSetLayout
+    };
+    vkAllocateDescriptorSets(device, &allocInfo, &trainDescriptorSet);
+
+    VkDescriptorBufferInfo camInfo{
+        .buffer = cameraBuffers[0],
+        .offset = 0,
+        .range = sizeof(CameraUBO)
+    };
+    VkDescriptorImageInfo outImageInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = offscreenImageViews[0],
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorImageInfo gtImageInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = gtImageView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorImageInfo outContributionInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = outContributionImageView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorImageInfo curSSIMStatsInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = curSSIMStatsImageView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorImageInfo gtSSIMStatsInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = gtSSIMStatsImageView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorImageInfo tempSSIMStatsInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = tempSSIMStatsImageView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorImageInfo tempSSIMStatsInfo2{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = tempSSIMStatsImageView2,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+    };
+    VkDescriptorBufferInfo gaussianGradInfo{
+        .buffer = gaussianGradBuffer,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE
+    };
+    VkDescriptorBufferInfo gradPos2dInfo{
+        .buffer = gradPos2dBuffer,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE
+    };
+    VkDescriptorBufferInfo adamMomentInfo{
+        .buffer = adamMoments,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE
+    };
+
+    std::array<VkWriteDescriptorSet, 11> writes{};
+    writes[0] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .pBufferInfo = &camInfo
+    };
+    writes[1] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 1,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &outImageInfo
+    };
+    writes[2] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 2,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &gtImageInfo
+    };
+    writes[3] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 3,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &outContributionInfo
+    };
+    writes[4] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 4,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &curSSIMStatsInfo
+    };
+    writes[5] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 5,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &gtSSIMStatsInfo
+    };
+    writes[6] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 6,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &tempSSIMStatsInfo
+    };
+    writes[7] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 7,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &tempSSIMStatsInfo2
+    };
+    writes[8] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 8,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &gaussianGradInfo
+    };
+    writes[9] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 9,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &gradPos2dInfo
+    };
+    writes[10] = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = trainDescriptorSet,
+        .dstBinding = 10,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &adamMomentInfo
+    };
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    std::array<VkDescriptorSetLayout, 2> trainSetLayouts = {globalDescriptorSetLayout, trainSetLayout};
+    
+    VkPipeline rasterTrainComputePipeline;
+    VkPipelineLayout rasterTrainComputePipelineLayout;
+    VkPushConstantRange rasterPushRange{};
+    rasterPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    rasterPushRange.offset = 0;
+    rasterPushRange.size = sizeof(RasterPush);
+    createComputePipeline(rasterTrainComputePipeline, rasterTrainComputePipelineLayout, 
+                        "../shader/spv/raster_train.spv", 1, &rasterPushRange, static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
+
+    VkPushConstantRange convPushRange = rasterPushRange;
+    convPushRange.size = sizeof(int);
+    VkPipeline convComputePipeline;
+    VkPipelineLayout convComputePipelineLayout;
+    createComputePipeline(convComputePipeline, convComputePipelineLayout, 
+                        "../shader/spv/convolute.spv", 1, &convPushRange, static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
+
+    VkPushConstantRange backPushRange = rasterPushRange;
+    backPushRange.size = sizeof(BackwardPush);
+    VkPipeline backwardComputePipeline;
+    VkPipelineLayout backwardComputePipelineLayout;
+    createComputePipeline(backwardComputePipeline, backwardComputePipelineLayout, 
+                        "../shader/spv/backward.spv", 1, &backPushRange, static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
+
+    VkPushConstantRange adamPushRange = backPushRange;
+    adamPushRange.size = sizeof(AdamPush);
+    VkPipeline adamComputePipeline;
+    VkPipelineLayout adamComputePipelineLayout;
+    createComputePipeline(adamComputePipeline, adamComputePipelineLayout, 
+                        "../shader/spv/adam.spv", 1, &adamPushRange, static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
+
+    VkBuffer globalStagingBuffer;
+    VkDeviceMemory globalStagingBufferMemory;
+    createBuffer(render_width * render_height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, globalStagingBuffer, globalStagingBufferMemory);
+    void* data;
+    vkMapMemory(device, globalStagingBufferMemory, 0, render_width * render_height * 4, 0, &data);
+
+    uint32_t steps = 1;
+    int frameIdx = 0; // Use symmetric 1-frame rendering for training instead of MAX_FRAME_IN_FLIGHT to prevent data races
+    while (iterations--) {
+        printf("Steps : %d\n", steps);
+
+        VkCommandBuffer cmdbuf = computeCommandBuffers[frameIdx];
+        VkCommandBuffer cmdbuf2 = computeCommandBuffers2[frameIdx];
+
+        // --- Synchronization & Resets ---
+        vkWaitForFences(device, 1, &computeInFlightFences[frameIdx], VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &computeInFlightFences[frameIdx]);
+
+        vkResetCommandBuffer(cmdbuf, 0);
+        vkResetCommandBuffer(cmdbuf2, 0);
+
+        // --- Resource Updates (Move after Fence Wait to avoid Data Race) ---
+        // Pick a random image for training
+        int imgIdx = rand() % images.size();
+        const Image& img = images[imgIdx];
+        setCameraFromColmap(img);
+
+        // Load ground truth image if not in cache
+        if (gtImageCache[imgIdx].empty()) {
+            std::string imagePath = "../dense/images/" + img.name;
+            int texWidth, texHeight, texChannels;
+            stbi_uc* pixels = stbi_load(imagePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+            if (!pixels) {
+                throw std::runtime_error("Failed to load ground truth image: " + imagePath);
+            }
+
+            gtImageCache[imgIdx].resize(render_width * render_height * 4);
+            if (texWidth != render_width || texHeight != render_height) {
+                stbir_resize_uint8_linear(pixels, texWidth, texHeight, 0, gtImageCache[imgIdx].data(), render_width, render_height, 0, STBIR_RGBA);
+            } else {
+                memcpy(gtImageCache[imgIdx].data(), pixels, render_width * render_height * 4);
+            }
+            stbi_image_free(pixels);
+        }
+
+        // Upload to staging buffer
+        memcpy(data, gtImageCache[imgIdx].data(), render_width * render_height * 4);
+
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        VkImageSubresourceRange subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        // --- Pass A (Projection & Argpass) ---
+        vkBeginCommandBuffer(cmdbuf, &beginInfo);
+
+        // Transition gtImage to TRANSFER_DST_OPTIMAL
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = gtImage;
+        barrier.subresourceRange = subresourceRange;
+
+        vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {render_width, render_height, 1};
+        vkCmdCopyBufferToImage(cmdbuf, globalStagingBuffer, gtImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        // Transition gtImage back to GENERAL
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        vkCmdFillBuffer(cmdbuf, gaussianGradBuffer, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmdbuf, gradPos2dBuffer, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmdbuf, tileRangeBuffer, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmdbuf, projectedGaussianBuffer, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmdbuf, keyBuffer, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmdbuf, valueBuffer, 0, VK_WHOLE_SIZE, 0xFFFFFFFF);
+
+        // Clear outContribution to sentinel value (0xFFFFFFFF)
+        VkClearColorValue clearValue;
+        clearValue.uint32[0] = 0xFFFFFFFFu;
+        clearValue.uint32[1] = 0xFFFFFFFFu;
+        clearValue.uint32[2] = 0xFFFFFFFFu;
+        clearValue.uint32[3] = 0xFFFFFFFFu;
+        
+        VkImageSubresourceRange clearRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmdbuf, outContribution, VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
+
+
+        VkMemoryBarrier initBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        initBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        initBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdbuf,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &initBarrier, 0, nullptr, 0, nullptr);
+
+        uint32_t pushData[2] = {totalGaussians, KVCapacity};
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
+        vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), pushData);
+        VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[frameIdx]};
+        vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf, (totalGaussians + 255) / 256, 1, 1);
+
+        VkMemoryBarrier midPassABarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        midPassABarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        midPassABarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdbuf,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &midPassABarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipeline);
+        vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, argpassComputePipelineLayout, 0, 2, bindDescriptorSets, 0, nullptr);
+        vkCmdPushConstants(cmdbuf, argpassComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &KVCapacity);
+        vkCmdDispatch(cmdbuf, 1, 1, 1);
+        vkEndCommandBuffer(cmdbuf);
+
+        VkSubmitInfo submitInfoA{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfoA.commandBufferCount = 1;
+        submitInfoA.pCommandBuffers = &cmdbuf;
+        submitInfoA.signalSemaphoreCount = 1;
+        submitInfoA.pSignalSemaphores = &projectionFinishedSemaphores[frameIdx];
+        vkQueueSubmit(computeQueue, 1, &submitInfoA, VK_NULL_HANDLE);
+
+        // --- Pass B (Sort, Range, Raster) ---
+        vkBeginCommandBuffer(cmdbuf2, &beginInfo);
+        vrdxCmdSortKeyValueIndirect(cmdbuf2, sorter, KVCapacity,
+                                    counterBuffer, 0, keyBuffer, 0,
+                                    valueBuffer, 0, pingpongBuffer, 0, VK_NULL_HANDLE, 0);
+
+        VkMemoryBarrier postSortBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postSortBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        postSortBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(cmdbuf2,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                            0, 1, &postSortBarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rangeComputePipelineLayout, 0, 1, &globalDescriptorSets, 0, nullptr);
+        vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,rangeComputePipeline);
+        vkCmdPushConstants(cmdbuf2, rangeComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &num_tiles);
+        vkCmdDispatchIndirect(cmdbuf2, indirectArgsBuffer, 0);
+
+        VkImageMemoryBarrier imageToGeneralBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        imageToGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        imageToGeneralBarrier.image = offscreenImages[frameIdx];
+        imageToGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageToGeneralBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        imageToGeneralBarrier.srcAccessMask = VK_ACCESS_NONE;
+        imageToGeneralBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        imageToGeneralBarrier.subresourceRange = subresourceRange;
+
+        VkImageMemoryBarrier contribToGeneralBarrier = imageToGeneralBarrier;
+        contribToGeneralBarrier.image = outContribution;
+
+        std::array<VkImageMemoryBarrier, 2> imageBarriers = {imageToGeneralBarrier, contribToGeneralBarrier};
+
+        VkMemoryBarrier postRangeBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postRangeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        postRangeBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmdbuf2,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &postRangeBarrier, 0, nullptr, imageBarriers.size(), imageBarriers.data());
+
+        vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipeline);
+        // Generate random solid background color
+        float bgR = static_cast<float>(rand()) / RAND_MAX;
+        float bgG = static_cast<float>(rand()) / RAND_MAX;
+        float bgB = static_cast<float>(rand()) / RAND_MAX;
+        RasterPush rasterPush{KVCapacity, bgR, bgG, bgB};
+        vkCmdPushConstants(cmdbuf2, rasterTrainComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RasterPush), &rasterPush);
+        VkDescriptorSet bindTrainDescriptorSets[] = {globalDescriptorSets, trainDescriptorSet};
+        vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipelineLayout, 0, 2, bindTrainDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+        // backward here
+        VkMemoryBarrier preConvBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        preConvBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        preConvBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmdbuf2,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &preConvBarrier, 0, nullptr, 0, nullptr);
+
+        int vertical = 0;
+        vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, convComputePipeline);
+        vkCmdPushConstants(cmdbuf2, convComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int), &vertical);
+        vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, convComputePipelineLayout, 0, 2, bindTrainDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+        VkMemoryBarrier midConvBarrier = preConvBarrier;
+        vkCmdPipelineBarrier(cmdbuf2,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &midConvBarrier, 0, nullptr, 0, nullptr);
+
+        vertical = 1;
+        vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, convComputePipeline);
+        vkCmdPushConstants(cmdbuf2, convComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int), &vertical);
+        vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, convComputePipelineLayout, 0, 2, bindTrainDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+        VkMemoryBarrier postConvBarrier = midConvBarrier;
+        vkCmdPipelineBarrier(cmdbuf2,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &postConvBarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, backwardComputePipeline);
+        BackwardPush backPush{lambda, bgR, bgG, bgB, KVCapacity};
+
+        vkCmdPushConstants(cmdbuf2, backwardComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BackwardPush), &backPush);
+        vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, backwardComputePipelineLayout, 0, 2, bindTrainDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+        // 저장한 그래디언트를 통한 역전파 및 밀도 조정
+        VkMemoryBarrier preAdamBarrier = postConvBarrier;
+        vkCmdPipelineBarrier(cmdbuf2,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &preAdamBarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, adamComputePipeline);
+        AdamPush adamPush{lr, beta1, beta2, eps, steps, totalGaussians};
+        vkCmdPushConstants(cmdbuf2, adamComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AdamPush), &adamPush);
+        vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, adamComputePipelineLayout, 0, 2, bindTrainDescriptorSets, 0, nullptr);
+        vkCmdDispatch(cmdbuf2, (totalGaussians + 255) / 256, 1, 1);
+
+        vkEndCommandBuffer(cmdbuf2);
+
+        VkSubmitInfo submitInfoB{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        VkPipelineStageFlags computeWaitStages[] = {VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT};
+        submitInfoB.commandBufferCount = 1;
+        submitInfoB.pCommandBuffers = &cmdbuf2;
+        submitInfoB.waitSemaphoreCount = 1;
+        submitInfoB.pWaitSemaphores = &projectionFinishedSemaphores[frameIdx];
+        submitInfoB.pWaitDstStageMask = computeWaitStages;
+        submitInfoB.signalSemaphoreCount = 0;
+        submitInfoB.pSignalSemaphores = nullptr;
+
+        vkQueueSubmit(computeQueue, 1, &submitInfoB, computeInFlightFences[frameIdx]);
+
+        ++steps;
+    }
+
+    vkDeviceWaitIdle(device);
+
+    vkUnmapMemory(device, globalStagingBufferMemory);
+    vkDestroyBuffer(device, globalStagingBuffer, nullptr);
+    vkFreeMemory(device, globalStagingBufferMemory, nullptr);
+    
+    vkDestroyPipeline(device, rasterTrainComputePipeline, nullptr);
+    vkDestroyPipelineLayout(device, rasterTrainComputePipelineLayout, nullptr);
+    vkDestroyPipeline(device, convComputePipeline, nullptr);
+    vkDestroyPipelineLayout(device, convComputePipelineLayout, nullptr);
+    vkDestroyPipeline(device, backwardComputePipeline, nullptr);
+    vkDestroyPipelineLayout(device, backwardComputePipelineLayout, nullptr);
+    vkDestroyPipeline(device, adamComputePipeline, nullptr);
+    vkDestroyPipelineLayout(device, adamComputePipelineLayout, nullptr);
+    vkDestroyDescriptorPool(device, trainPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, trainSetLayout, nullptr);
+
+    vkDestroyImageView(device, gtSSIMStatsImageView, nullptr);
+    vkDestroyImage(device, gtSSIMStats, nullptr);
+    vkFreeMemory(device, gtSSIMStatsMemory, nullptr);
+
+    vkDestroyBuffer(device, gaussianGradBuffer, nullptr);
+    vkFreeMemory(device, gaussianGradBufferMemory, nullptr);
+    vkDestroyBuffer(device, gradPos2dBuffer, nullptr);
+    vkFreeMemory(device, gradPos2dBufferMemory, nullptr);
+    vkDestroyBuffer(device, adamMoments, nullptr);
+    vkFreeMemory(device, adamMomentsMemory, nullptr);
+    vkDestroyImageView(device, outContributionImageView, nullptr);
+    vkDestroyImageView(device, gtImageView, nullptr);
+    vkDestroyImageView(device, curSSIMStatsImageView, nullptr);
+    vkDestroyImageView(device, tempSSIMStatsImageView, nullptr);
+    vkDestroyImageView(device, tempSSIMStatsImageView2, nullptr);
+    
+    vkDestroyImage(device, outContribution, nullptr);
+    vkDestroyImage(device, gtImage, nullptr);
+    vkDestroyImage(device, curSSIMStats, nullptr);
+    vkDestroyImage(device, tempSSIMStats, nullptr);
+    vkDestroyImage(device, tempSSIMStats2, nullptr);
+
+    vkFreeMemory(device, outContributionMemory, nullptr);
+    vkFreeMemory(device, gtImageMemory, nullptr);
+    vkFreeMemory(device, curSSIMStatsMemory, nullptr);
+    vkFreeMemory(device, tempSSIMStatsMemory, nullptr);
+    vkFreeMemory(device, tempSSIMStatsMemory2, nullptr);
+
+
+    // export gaussians count, params
+    VkDeviceSize exportSize = sizeof(Gaussian3D) * totalGaussians;
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    createBuffer(exportSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+    copyBuffer(gaussianBuffer, stagingBuffer, exportSize);
+
+    void* pExportData;
+    vkMapMemory(device, stagingBufferMemory, 0, exportSize, 0, &pExportData);
+    std::vector<Gaussian3D> exportedGaussians(totalGaussians);
+    memcpy(exportedGaussians.data(), pExportData, exportSize);
+    vkUnmapMemory(device, stagingBufferMemory);
+
+    vkDestroyBuffer(device, stagingBuffer, nullptr);
+    vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+    Core::exportGaussians("trained_gaussians.bin", exportedGaussians, totalGaussians);
+}
 
 Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Point> &points) {
 
@@ -287,7 +985,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     maxGaussians = totalGaussians << 1;
     std::vector<Gaussian3D> src_tmp = gaussianFromPoints(points, totalGaussians, maxGaussians);
 
-    createStorageBuffer<Gaussian3D>(src_tmp, gaussianBuffer, gaussianBufferMemory);
+    createStorageBuffer<Gaussian3D>(src_tmp, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, gaussianBuffer, gaussianBufferMemory);
     createStorageBuffer<Gaussian2D>(maxGaussians, projectedGaussianBuffer, projectedGaussianBufferMemory);
 
     int n_tiles_row = (render_height + 15) >> 4;
@@ -334,8 +1032,12 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
     rangePush.size = sizeof(uint32_t); // num_tiles
     createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout,
 						"../shader/spv/range.spv", 1, &rangePush, 1, &globalDescriptorSetLayout);
+    VkPushConstantRange rasterPush{};
+    rasterPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    rasterPush.offset = 0;
+    rasterPush.size = sizeof(uint32_t); // KVCapacity
     createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout,
-						"../shader/spv/raster.spv", 0, nullptr, setLayout.size(), setLayout.data());
+						"../shader/spv/raster.spv", 1, &rasterPush, setLayout.size(), setLayout.data());
 
     VkPushConstantRange argpassPush{};
     argpassPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -345,6 +1047,89 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 						"../shader/spv/argpass.spv", 1, &argpassPush, setLayout.size(), setLayout.data());
     // createRenderpass();
 }
+
+Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector<Core::Gaussian3D> &gaussians) {
+
+    initWindow();
+    createInstance();
+    setupDebugMessenger();
+    glfwCreateWindowSurface(instance, pWindow, nullptr, &surface);
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapchain();
+    createSwapchainImageViews();
+    createCommandPool();
+    createCommandBuffers();
+    createSyncObjects();
+
+    render_width = src_width * scale;
+    render_height = src_height * scale;
+    totalGaussians = gaussians.size();
+    maxGaussians = totalGaussians << 1;
+
+    createStorageBuffer<Gaussian3D>(gaussians, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, gaussianBuffer, gaussianBufferMemory);
+    createStorageBuffer<Gaussian2D>(maxGaussians, projectedGaussianBuffer, projectedGaussianBufferMemory);
+
+    int n_tiles_row = (render_height + 15) >> 4;
+    int n_tiles_col = (render_width + 15) >> 4;
+    num_tiles = n_tiles_row * n_tiles_col;
+    createStorageBuffer<TileRange>(num_tiles, tileRangeBuffer, tileRangeBufferMemory);
+    createBuffer(sizeof(uint32_t) * 3,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+				VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+				VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indirectArgsBuffer,
+				indirectArgsBufferMemory);
+
+    cameraBuffers.resize(MAX_FRAME_IN_FLIGHT);
+    cameraBufferMemory.resize(MAX_FRAME_IN_FLIGHT);
+    cameraBufferMapped.resize(MAX_FRAME_IN_FLIGHT);
+    offscreenImages.resize(MAX_FRAME_IN_FLIGHT);
+    offscreenImageViews.resize(MAX_FRAME_IN_FLIGHT);
+    imageMemory.resize(MAX_FRAME_IN_FLIGHT);
+    for (int i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
+        createUniformBuffer<CameraUBO>(cameraBuffers[i], cameraBufferMemory[i], cameraBufferMapped[i]);
+        createImage(render_width, render_height, VK_FORMAT_R8G8B8A8_UNORM,
+					VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+					VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, offscreenImages[i],
+					imageMemory[i]);
+        createImageView(VK_FORMAT_R8G8B8A8_UNORM, offscreenImages[i], offscreenImageViews[i]);
+    }
+    createSorterAndBuffer();
+    createDescriptorSetLayouts();
+    createDescriptorPool();
+    createDescriptorSets();
+
+    VkPushConstantRange push{};
+    push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    push.offset = 0;
+    push.size = sizeof(uint32_t) * 2; // totalGaussians + kvCapacity
+    std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
+    createComputePipeline(projComputePipeline, projComputePipelineLayout,
+						"../shader/spv/proj.spv", 1, &push, setLayout.size(), setLayout.data());
+    VkPushConstantRange rangePush{};
+    rangePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    rangePush.offset = 0;
+    rangePush.size = sizeof(uint32_t); // num_tiles
+    createComputePipeline(rangeComputePipeline, rangeComputePipelineLayout,
+						"../shader/spv/range.spv", 1, &rangePush, 1, &globalDescriptorSetLayout);
+    VkPushConstantRange rasterPush{};
+    rasterPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    rasterPush.offset = 0;
+    rasterPush.size = sizeof(uint32_t); // KVCapacity
+    createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout,
+						"../shader/spv/raster.spv", 1, &rasterPush, setLayout.size(), setLayout.data());
+
+    VkPushConstantRange argpassPush{};
+    argpassPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    argpassPush.offset = 0;
+    argpassPush.size = sizeof(uint32_t); // kvCapacity
+    createComputePipeline(argpassComputePipeline, argpassComputePipelineLayout,
+						"../shader/spv/argpass.spv", 1, &argpassPush, setLayout.size(), setLayout.data());
+    // createRenderpass();
+}
+
 
 Engine::~Engine() {
     vkDeviceWaitIdle(device);
@@ -685,47 +1470,6 @@ void Engine::createSwapchainImageViews() {
     }
 }
 
-// void Engine::createRenderpass() {
-
-// 	VkAttachmentDescription colorAtt{};
-// 	colorAtt.format = swapchainImageFormat;
-// 	colorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
-// 	colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_NONE; // 이미 compute shader에서 그렸기 때문 
-// 	colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-// 	colorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-// 	colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-// 	colorAtt.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
-// 	colorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-// 	VkAttachmentReference colorAttRef{};
-// 	colorAttRef.attachment = 0;
-// 	colorAttRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-// 	VkSubpassDescription subpass{};
-// 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-// 	subpass.colorAttachmentCount = 1;
-// 	subpass.pColorAttachments = &colorAttRef;
-
-// 	VkSubpassDependency dependency{};
-// 	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-// 	dependency.dstSubpass = 0;
-// 	dependency.srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-// 	dependency.srcAccessMask = 0;
-// 	dependency.dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-// 	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-// 	VkRenderPassCreateInfo renderInfo{};
-// 	renderInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-// 	renderInfo.attachmentCount = 1;
-// 	renderInfo.pAttachments = &colorAtt;
-// 	renderInfo.subpassCount = 1;
-// 	renderInfo.pSubpasses = &subpass;
-// 	renderInfo.dependencyCount = 1;
-// 	renderInfo.pDependencies = &dependency;
-
-// 	vkCreateRenderPass(device, &renderInfo, nullptr, &renderpass);
-// }
-
 void Engine::createCommandPool() {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -922,7 +1666,7 @@ void Engine::createDescriptorSets() {
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = gaussianBuffer;
     bufferInfo.offset = 0;
-    bufferInfo.range = sizeof(Gaussian3D) * maxGaussians;
+    bufferInfo.range = VK_WHOLE_SIZE;
 
     VkDescriptorBufferInfo bufferInfo1{};
     bufferInfo1.buffer = projectedGaussianBuffer;
@@ -1323,6 +2067,40 @@ void Engine::createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer, Vk
     vkFreeMemory(device, stagingBufferMemory, nullptr);
 }
 
+template <typename T>
+void Engine::createStorageBuffer(std::vector<T> &srcBuffer, VkBufferUsageFlags usage, VkBuffer &buffer, VkDeviceMemory &bufferMemory) {
+
+    VkDeviceSize size = sizeof(T) * srcBuffer.size();
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    void *pData;
+
+    createBuffer(size,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				stagingBuffer, stagingBufferMemory);
+
+    vkMapMemory(device, stagingBufferMemory, 0, size, 0, &pData);
+    memcpy(pData, srcBuffer.data(), size);
+    vkUnmapMemory(device, stagingBufferMemory);
+
+    createBuffer(size,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				buffer, bufferMemory);
+
+    VkBufferCopy region{};
+    region.size = size;
+
+    VkCommandBuffer cmdbuf = beginSingleTimeCommands();
+    vkCmdCopyBuffer(cmdbuf, stagingBuffer, buffer, 1, &region);
+    endSingleTimeCommands(cmdbuf);
+
+    vkDestroyBuffer(device, stagingBuffer, nullptr);
+    vkFreeMemory(device, stagingBufferMemory, nullptr);
+}
+
 VkCommandBuffer Engine::beginSingleTimeCommands() {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1340,6 +2118,19 @@ VkCommandBuffer Engine::beginSingleTimeCommands() {
 
     return cmdbuf;
 }
+
+void Engine::endSingleTimeComputeCommands(VkCommandBuffer commandBuffer) {
+    vkEndCommandBuffer(commandBuffer);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    vkQueueSubmit(computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(computeQueue);
+    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+};
 
 void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkEndCommandBuffer(commandBuffer);
@@ -1432,6 +2223,73 @@ void Engine::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize siz
     endSingleTimeCommands(commandBuffer);
 }
 
+void Engine::transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = oldLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkPipelineStageFlags sourceStage;
+    VkPipelineStageFlags destinationStage;
+
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_GENERAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destinationStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_GENERAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_GENERAL && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else {
+        throw std::invalid_argument("unsupported layout transition!");
+    }
+
+    vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    endSingleTimeCommands(commandBuffer);
+}
+
+void Engine::copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {width, height, 1};
+
+    vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    endSingleTimeCommands(commandBuffer);
+}
+
 void Engine::verifyRadixSort(bool preSort) {
     // 1. Read element count from counterBuffer
     uint32_t count = 0;
@@ -1514,4 +2372,5 @@ void Engine::verifyRadixSort(bool preSort) {
 
     checkBuffer(keyBuffer, "keyBuffer (Original)");
 }
+
 } // namespace Core

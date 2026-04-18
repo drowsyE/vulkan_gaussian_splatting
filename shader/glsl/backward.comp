@@ -1,1 +1,315 @@
 #version 450
+
+// parameters to be updated : mean, scale, opacity, rotation, color
+
+struct TileRange {
+    uint start;
+    uint end;
+};
+
+struct Gaussian {
+    vec3 mean;        
+    float pad1;
+    vec4 scaleOpacity; 
+    vec4 rot;          // quatarnion
+    vec3 color;        // will be changed to SH coefficients soon
+    float pad;
+};
+
+struct Gaussian2D {
+    vec2 pos2d;
+    vec2 pad0;
+    vec3 conics;
+    float opacity;
+    vec3 color;
+    float pad1;
+};
+
+struct GaussianGrad {
+    uint mean[3];
+    uint pad1;
+    uint scale[3];
+    uint opacity;
+    uint rot[4];
+    uint color[3];
+    uint pad2;
+};
+
+layout(set = 0, binding = 0) buffer readonly Gaussians { Gaussian gaussians[]; };
+layout(set = 0, binding = 1) buffer readonly ProjectedGaussians { Gaussian2D projectedGaussians[]; };
+layout(set = 0, binding = 3) buffer readonly Values { uint values[]; };
+layout(set = 0, binding = 4) buffer readonly Counter { uint kvCount; };
+layout(set = 0, binding = 5) buffer readonly TileRanges { TileRange ranges[]; };
+
+layout(set = 1, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    mat4 viewProj;
+    vec4 camPos;
+    vec2 viewportSize;
+    float focalX;
+    float focalY;
+} cb;
+
+layout(set = 1, binding = 1, rgba8) uniform readonly image2D outImage;
+layout(set = 1, binding = 2, rgba8) uniform readonly image2D gtImage;
+layout(set = 1, binding = 3, r32ui) uniform readonly uimage2D outContribution;
+layout(set = 1, binding = 4, rgba32f) uniform readonly image2D curSSIMStats;
+layout(set = 1, binding = 5, rg32f) uniform readonly image2D gtSSIMStats; 
+layout(set = 1, binding = 8) buffer GradGaussiansBlock { GaussianGrad gradGaussians[]; };
+layout(set = 1, binding = 9) buffer GradPos2dBlock { uint gradPos2d[]; }; // cpp에서 float*로 읽으면 됨
+
+// spinlock style atomic add (Macro implementation for buffer resolution)
+#define atomicAddFloat(mem, data) \
+{ \
+    uint oldVal = mem; \
+    uint assumed; \
+    do { \
+        assumed = oldVal; \
+        float newVal = uintBitsToFloat(assumed) + (data); \
+        oldVal = atomicCompSwap(mem, assumed, floatBitsToUint(newVal)); \
+    } while (assumed != oldVal); \
+}
+
+layout(push_constant) uniform PushConstants {
+    float lambda;
+    float bgR;
+    float bgG;
+    float bgB;
+    uint kvCapacity;
+} p;
+
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+mat3 quaternionToRotationMatrix(vec4 q) {
+    float x = q.x;
+    float y = q.y;
+    float z = q.z;
+    float w = q.w;
+
+    return mat3(
+        1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w),
+        2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w),
+        2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)
+    );
+}
+
+const vec3 lw = vec3(0.299, 0.587, 0.114); // luminance
+
+void main() {
+    ivec2 curr = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    
+    bool inside = (curr.x < size.x && curr.y < size.y);
+    if (!inside) return;
+
+    uint n_cols = (size.x + 15u) >> 4u;
+    uint n_rows = (size.y + 15u) >> 4u;
+    uint tileIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * n_cols;
+
+    // -- start of dL/dC ---
+    const float C1 = 0.0001f;
+    const float C2 = 0.0009f;
+    const float lambda = p.lambda;
+
+    vec4 stats = imageLoad(curSSIMStats, curr);
+    float mu_x  = stats.r;
+    float var_x = stats.g;
+    float cov_xy = stats.b;
+    float T_last = stats.a;
+    
+    vec3 accum_Tac = vec3(p.bgR, p.bgG, p.bgB) * T_last;
+
+    float mu_y = imageLoad(gtSSIMStats, curr).r;
+    float var_y = imageLoad(gtSSIMStats, curr).g;
+
+    vec3 c_pred = imageLoad(outImage, curr).rgb;
+    vec3 c_gt   = imageLoad(gtImage, curr).rgb;
+
+    // L1 Gradient
+    vec3 dL1_dC = sign(c_pred - c_gt);
+
+    // 현재 픽셀의 휘도(Luminance) 계산
+    float c_pred_lum = dot(c_pred, lw);
+    float c_gt_lum   = dot(c_gt, lw);
+
+    // SSIM 및 휘도 기준 미분값(Scalar) 계산
+    float A = 2.0 * mu_x * mu_y + C1;
+    float B = 2.0 * cov_xy + C2;
+    float C = mu_x * mu_x + mu_y * mu_y + C1;
+    float D = var_x + var_y + C2;
+    float ssim = (A * B) / (C * D);
+
+    // dSSIM / dLuminance (스칼라 미분값)
+    float common_factor = 2.0 / (C * D);
+    float dSSIM_dLum = common_factor * (mu_y - ssim * mu_x) + 
+                       common_factor * (c_gt_lum - mu_y - ssim * (c_pred_lum - mu_x));
+
+    // dLum/dC = w
+    vec3 dSSIM_dC = dSSIM_dLum * lw;
+
+    // Total Gradient
+    vec3 dL_dC = (1.0 - lambda) * dL1_dC - lambda * dSSIM_dC;
+    // --- end of dL\dC --
+
+
+    // Get tile range
+    uint start = 0;
+    uint end = 0;
+    if (tileIdx < n_cols * n_rows) {
+        start = ranges[tileIdx].start;
+        end = imageLoad(outContribution, curr).x;
+    }
+
+    // If no contribution (sentinel value) or invalid range
+    if (end == 0xFFFFFFFFu || end < start) return;
+
+    // Safety check for KV capacity
+    if (end >= p.kvCapacity) end = p.kvCapacity - 1;
+
+    // 뒷쪽에 있는 가우시안의 그래디언트부터 계산
+    for (uint i = end; i >= start && i != 0xFFFFFFFFu; i--) {
+
+
+        uint gIdx = values[i]; // 실제 가우시안 인덱스로 변환
+        Gaussian2D g = projectedGaussians[gIdx];
+        Gaussian gauss = gaussians[gIdx];
+
+        vec2 d = vec2(curr) - g.pos2d;
+
+        float power = -0.5 * (g.conics.x * d.x * d.x + 2.0 * g.conics.y * d.x * d.y + g.conics.z * d.y * d.y);
+        float G = exp(power);
+        float alpha = min(0.99, g.opacity * G);
+        if (alpha < 1.0/255.0) continue; 
+
+        T_last /= (1 - alpha + 1e-7);
+        float T_i = T_last;
+
+        // --- 1. dL/dalpha_prime (Effective Alpha에 대한 미분) ---
+        // 유도한 수식: T_i * c_i - (1/(1-alpha)) * K
+        vec3 dC_da_v = T_i * g.color - accum_Tac / (1.0 - alpha + 1e-7);
+        float dL_da = dot(dL_dC, dC_da_v);
+
+        // --- 2. dL/dc (Color에 대한 미분) ---
+        vec3 dL_dc = dL_dC * (T_i * alpha);
+
+        // --- 3. dL/do (Opacity에 대한 미분) ---
+        // alpha_prime = opacity * G 이므로 d_alpha/d_opacity = G
+        float dL_do = dL_da * G;
+
+        // --- 4. dL/dpos2d (2D 중심점에 대한 미분) ---
+        // d_alpha/d_G = opacity, d_G/d_power = G, d_power/d_pos2d = M * d
+        // 여기서 M은 conics 매트릭스 [x, y; y, z]
+        float dL_dG = dL_da * g.opacity;
+        float dL_dpower = dL_dG * G;
+        mat2 conicMat = mat2(
+            g.conics.x, g.conics.y,
+            g.conics.y, g.conics.z
+        );
+        
+        vec2 dpower_dpos2d = conicMat * d;
+        vec2 dL_dpos2d = dL_dpower * dpower_dpos2d;
+
+        // --- 5. dL/dconic (Conic 파라미터 x, y, z에 대한 미분) ---
+        // power = -0.5 * (x*dx^2 + 2*y*dx*dy + z*dy^2)
+        vec3 dL_dconic = dL_dpower * vec3(
+            -0.5 * d.x * d.x,
+            -1.0 * d.x * d.y,
+            -0.5 * d.y * d.y
+        );
+
+
+        // --- 6. dL/dpos3d ---
+        vec4 t_homo = cb.view * vec4(gauss.mean, 1.0);
+        vec3 t = t_homo.xyz;
+
+        float f_x = cb.focalX;
+        float f_y = cb.focalY;
+        float tz = -t.z; // 양수 깊이 값 (오른손 좌표계 보정)
+        float tz2 = tz * tz;
+
+        mat3x2 J = mat3x2(
+            f_x / tz, 0.0, 
+            0.0, -f_y / tz, 
+            -(f_x * t.x) / tz2, (f_y * t.y) / tz2
+        );
+        
+        vec3 dL_dpos3d = dL_dpos2d * J;
+
+        // --- 7. dL/ds \ dL/dq ---
+
+        // 7-1 : conic -> 3D covariance
+        mat2x2 ddT = outerProduct(d, d);
+        mat2x2 dG_dSigma2d = 0.5f * G * conicMat * ddT * conicMat;
+        mat3x3 W = mat3x3(cb.view);
+        mat3x3 dL_dSigma3d = transpose(W) * transpose(J) * dL_dG * dG_dSigma2d * J * W; // dL/dSigma2d = J^T W^T dL/dSigma2d W J
+
+        // 7-2 : 3D covariance -> scale & quaternion
+        vec3 s_raw = gauss.scaleOpacity.xyz;
+        vec3 s = exp(s_raw); // 스케일이 음수가 되지 않도록 지수 함수 적용
+        vec4 q = gauss.rot;
+
+        mat3 R = quaternionToRotationMatrix(q);
+        mat3 S = mat3(
+            s.x, 0.0, 0.0,
+            0.0, s.y, 0.0,
+            0.0, 0.0, s.z
+        );
+        mat3 M = R * S;
+
+        // dL/dM = 2 * dL/dSigma3d * M
+        mat3 dL_dM = 2.0 * dL_dSigma3d * M;
+
+        // dL/ds_raw
+        // dL/ds_raw_j = dL/ds_j * exp(s_raw_j) = dot((dL/dM)_j, R_j) * s_j
+        vec3 dL_ds = vec3(
+            dot(dL_dM[0], R[0]),
+            dot(dL_dM[1], R[1]),
+            dot(dL_dM[2], R[2])
+        ) * s;
+
+        // dL/dq
+        // U = dL_dM * S
+        mat3 U = dL_dM * S;
+        
+        float w = q.w;
+        float x = q.x;
+        float y = q.y;
+        float z = q.z;
+
+        float dL_dr  = 2.0 * z * (U[0][1] - U[1][0]) + 2.0 * y * (U[2][0] - U[0][2]) + 2.0 * x * (U[1][2] - U[2][1]);
+        float dL_dqx = 2.0 * y * (U[1][0] + U[0][1]) + 2.0 * z * (U[2][0] + U[0][2]) + 2.0 * w * (U[1][2] - U[2][1]) - 4.0 * x * (U[1][1] + U[2][2]);
+        float dL_dqy = 2.0 * x * (U[1][0] + U[0][1]) + 2.0 * w * (U[2][0] - U[0][2]) + 2.0 * z * (U[2][1] + U[1][2]) - 4.0 * y * (U[0][0] + U[2][2]);
+        float dL_dqz = 2.0 * w * (U[0][1] - U[1][0]) + 2.0 * x * (U[2][0] + U[0][2]) + 2.0 * y * (U[2][1] + U[1][2]) - 4.0 * z * (U[0][0] + U[1][1]);
+
+        vec4 dL_dq = vec4(dL_dqx, dL_dqy, dL_dqz, dL_dr);
+        
+        // --- [업데이트] 다음(앞쪽) 가우시안을 위해 K(accum_Tac) 갱신 ---
+        accum_Tac += T_i * alpha * g.color;
+        
+
+        // --- [최종] 이제 각 가우시안의 global index에 dL들을 atomicAdd ---
+        atomicAddFloat(gradPos2d[gIdx * 2], dL_dpos2d.x);
+        atomicAddFloat(gradPos2d[gIdx * 2 + 1], dL_dpos2d.y);
+
+        atomicAddFloat(gradGaussians[gIdx].opacity, dL_do);
+
+        atomicAddFloat(gradGaussians[gIdx].mean[0], dL_dpos3d.x);
+        atomicAddFloat(gradGaussians[gIdx].mean[1], dL_dpos3d.y);
+        atomicAddFloat(gradGaussians[gIdx].mean[2], dL_dpos3d.z);
+
+        atomicAddFloat(gradGaussians[gIdx].scale[0], dL_ds.x);
+        atomicAddFloat(gradGaussians[gIdx].scale[1], dL_ds.y);
+        atomicAddFloat(gradGaussians[gIdx].scale[2], dL_ds.z);
+
+        atomicAddFloat(gradGaussians[gIdx].rot[0], dL_dq.x);
+        atomicAddFloat(gradGaussians[gIdx].rot[1], dL_dq.y);
+        atomicAddFloat(gradGaussians[gIdx].rot[2], dL_dq.z);
+        atomicAddFloat(gradGaussians[gIdx].rot[3], dL_dq.w);
+
+        atomicAddFloat(gradGaussians[gIdx].color[0], dL_dc.r);
+        atomicAddFloat(gradGaussians[gIdx].color[1], dL_dc.g);
+        atomicAddFloat(gradGaussians[gIdx].color[2], dL_dc.b);
+    }
+}

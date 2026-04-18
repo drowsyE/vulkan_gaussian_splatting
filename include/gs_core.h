@@ -53,10 +53,28 @@ typedef struct TileRange {
     uint32_t end;
 } TileRange;
 
+typedef struct RasterPush {
+    uint32_t capacity;
+    float bgR;
+    float bgG;
+    float bgB;
+} RasterPush;
+
+typedef struct BackwardPush {
+    float lambda;
+    float bgR;
+    float bgG;
+    float bgB;
+    uint32_t kvCapacity;
+} BackwardPush;
+
+
 // structure of cameras.bin : [number of camera] -> [camera1] -> [camera2] -> ...
 std::vector<Camera> readCameras(const char *path);
 std::vector<Image> readImages(const char *path);
 std::vector<Point> readPoints(const char *path);
 std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point>& points, size_t size, size_t capacity);
+void exportGaussians(const char *path, const std::vector<Gaussian3D>& gaussians, uint32_t num_gaussians);
+std::vector<Gaussian3D> readGaussians(const char *path);
 
 } // namespace Core

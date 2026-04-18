@@ -99,7 +99,7 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         Gaussian3D g;
         g.pos = glm::vec3(p.x, p.y, p.z);
         g.pad1 = 0.0f;
-        g.scaleOpacity = glm::vec4(0.05f, 0.05f, 0.05f, 0.15f);
+        g.scaleOpacity = glm::vec4(-3.f, -3.f, -3.f, 0.15f); // scale is log scaled
         // Default color: normalized from points (if available) or white for debug
         g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
         // g.color = glm::vec3(1.f, 1.f, 1.f);
@@ -109,6 +109,30 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         gaussians[i] = g;
     }
 
+    return gaussians;
+}
+
+void exportGaussians(const char *path, const std::vector<Gaussian3D>& gaussians, uint32_t num_gaussians) {
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) return;
+
+    file.write((const char*)&num_gaussians, sizeof(num_gaussians));
+    file.write((const char*)gaussians.data(), sizeof(Gaussian3D) * num_gaussians);
+    
+    file.close();
+}
+
+std::vector<Gaussian3D> readGaussians(const char *path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return {};
+
+    uint32_t num_gaussians;
+    file.read((char*)&num_gaussians, sizeof(num_gaussians));
+
+    std::vector<Gaussian3D> gaussians(num_gaussians);
+    file.read((char*)gaussians.data(), sizeof(Gaussian3D) * num_gaussians);
+
+    file.close();
     return gaussians;
 }
 

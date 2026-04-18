@@ -1,5 +1,7 @@
 #version 450
 
+// rasterization shader for training
+
 // TILE-BASED RASTERIZER
 // Uses sorted keys/values and tile ranges for efficient blending.
 
@@ -33,20 +35,26 @@ layout(set = 0, binding = 5) buffer readonly TileRanges {
     TileRange ranges[];
 };
 
-// layout(set = 1, binding = 0) uniform CameraUBO {
-//     mat4 view;
-//     mat4 proj;
-//     mat4 viewProj;
-//     vec4 camPos;
-//     vec2 viewportSize;
-//     float focalX;
-//     float focalY;
-// } cb;
+layout(set = 1, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    mat4 viewProj;
+    vec4 camPos;
+    vec2 viewportSize;
+    float focalX;
+    float focalY;
+} cb;
 
 layout(set = 1, binding = 1, rgba8) uniform writeonly image2D outImage;
+layout(set = 1, binding = 3, r32ui) uniform writeonly uimage2D outContribution;
+layout(set = 1, binding = 4, rgba32f) uniform image2D curSSIMStats;
 
-layout(push_constant) uniform PushConstant {
+
+layout(push_constant) uniform PushConstant {                                                    
     uint kvCapacity;
+    float bgR;
+    float bgG;
+    float bgB;
 } push;
 
 const uint BLOCK_SIZE = 256;
@@ -66,30 +74,32 @@ void main() {
     uint n_rows = (size.y + 15u) >> 4u;
     uint tileIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * n_cols;
 
+    // Background color
     vec3 C = vec3(0.0);
     float T = 1.0;
+    uint lastKVIdx = 0xFFFFFFFFu; // Initialize to sentinel
 
     // Get tile range
-    uint start = 0;
-    uint end = 0;
+    uint start_tile = 0;
+    uint end_tile = 0;
     if (tileIdx < n_cols * n_rows) {
-        start = ranges[tileIdx].start;
-        end = ranges[tileIdx].end;
+        start_tile = ranges[tileIdx].start;
+        end_tile = ranges[tileIdx].end;
     }
 
     // Safety checks
-    if (start > kvCount || end > kvCount || start > end) {
-        start = 0;
-        end = 0;
+    if (start_tile > kvCount || end_tile > kvCount || start_tile > end_tile) {
+        start_tile = 0;
+        end_tile = 0;
     }
 
     uint localId = gl_LocalInvocationIndex;
 
     // Iterate through gaussians in chunks to use shared memory
-    for (uint i = start; i < end; i += BLOCK_SIZE) {
+    for (uint i = start_tile; i < end_tile; i += BLOCK_SIZE) {
         // 1. Cooperative Load into shared memory
         uint globalIdx = i + localId;
-        if (globalIdx < end) {
+        if (globalIdx < end_tile) {
             uint gIdx = values[globalIdx];
             shared_indices[localId] = gIdx;
             if (gIdx < push.kvCapacity) {
@@ -105,7 +115,7 @@ void main() {
 
         // front-to-back compositing for early exit
         if (inside && T >= 0.0001) {
-            uint current_chunk_size = min(BLOCK_SIZE, end - i);
+            uint current_chunk_size = min(BLOCK_SIZE, end_tile - i);
             for (uint j = 0; j < current_chunk_size; j++) {
                 uint gIdx = shared_indices[j];
                 if (gIdx == 0xFFFFFFFFu) continue;
@@ -122,6 +132,7 @@ void main() {
                 float weight = alpha * T;
                 C += g.color * weight;
                 T *= (1.0 - alpha);
+                lastKVIdx = i + j; // Store the sorted index
 
                 if (T < 0.0001) break; 
             }
@@ -130,7 +141,14 @@ void main() {
         barrier();
     }
 
+
     if (inside) {
+        vec3 bg_color = vec3(push.bgR, push.bgG, push.bgB);
+        C += bg_color * T;
+
         imageStore(outImage, pixelCoord, vec4(C, 1.0));
+        imageStore(outContribution, pixelCoord, uvec4(lastKVIdx, 0, 0, 0));
+        imageStore(curSSIMStats, pixelCoord, vec4(0, 0, 0, T)); // store transmittance value to use at backward pass
     }
+
 }

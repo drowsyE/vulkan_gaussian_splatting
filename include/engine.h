@@ -17,10 +17,16 @@ class Engine {
 public:
   Engine(uint64_t src_width, uint64_t src_height, float scale,
          std::vector<Core::Point> &points);
+  Engine(uint64_t src_width, uint64_t src_height, float scale,
+         std::vector<Core::Gaussian3D> &gaussians);
   Engine();
+
   ~Engine();
 
   void run();
+  void train(std::vector<Image> &images, int32_t iterations,
+             float learning_rate = 1e-4, float beta1 = 0.9, float beta2 = 0.999,
+             float eps = 1e-8, float lambda = 0.2);
   void setCameraFromColmap(const Image &image);
 
 private:
@@ -116,7 +122,6 @@ private:
   VkPipeline argpassComputePipeline;
 
   void drawFrame();
-  void train();
 
   void initWindow();
   void createInstance();
@@ -139,6 +144,10 @@ private:
   template <typename T>
   void createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer,
                            VkDeviceMemory &bufferMemory);
+  
+  template <typename T>
+  void createStorageBuffer(std::vector<T> &srcBuffer, VkBufferUsageFlags usage,
+                          VkBuffer &buffer, VkDeviceMemory &bufferMemory);
 
   void createImage(uint32_t width, uint32_t height, VkFormat imageFormat,
                    VkImageUsageFlags imageUsage,
@@ -165,8 +174,11 @@ private:
                           VkMemoryPropertyFlags properties);
   VkCommandBuffer beginSingleTimeCommands();
   void endSingleTimeCommands(VkCommandBuffer commandBuffer);
+  void endSingleTimeComputeCommands(VkCommandBuffer commandBuffer);
   void updateCameraUBO(float deltaTime);
   void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+  void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
+  void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
 };
 
 } // namespace Core
