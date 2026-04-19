@@ -17,8 +17,8 @@ typedef struct Camera {
 
 typedef struct Image {
     uint32_t image_id;
-    double q[4]; // <- quaternion (rotation)
-    double t[3]; // <- translation
+    glm::quat q; // <- quaternion (rotation) , [w, x, y, z]
+    glm::vec3 t; // <- translation
     uint32_t camera_id;
     std::string name;
 } Image;
@@ -67,6 +67,12 @@ typedef struct BackwardPush {
     float bgB;
     uint32_t kvCapacity;
 } BackwardPush;
+
+typedef struct DensityControlPush {
+    float sceneExtent;
+    uint32_t maxGaussians;
+    uint32_t step;
+} DensityControlPush;
 
 
 // structure of cameras.bin : [number of camera] -> [camera1] -> [camera2] -> ...

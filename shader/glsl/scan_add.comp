@@ -1,0 +1,20 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Data { uint data[]; };
+layout(set = 0, binding = 1) buffer readonly BlockSums { uint blockSums[]; };
+
+void main() {
+    uint thid = gl_LocalInvocationID.x;
+    uint blockId = gl_WorkGroupID.x;
+    uint n = gl_WorkGroupSize.x << 1;
+    uint globalOff = blockId * n;
+
+    uint addValue = blockSums[blockId];
+
+    if (globalOff + 2 * thid < data.length())
+        data[globalOff + 2 * thid] += addValue;
+    if (globalOff + 2 * thid + 1 < data.length())
+        data[globalOff + 2 * thid + 1] += addValue;
+}

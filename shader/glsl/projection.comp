@@ -38,6 +38,11 @@ layout(set = 0, binding = 4) buffer Counter {
     uint kvCount;
 };
 
+layout(set = 0, binding = 7) buffer readonly GaussianCounter {
+    uint totalGaussians;
+};
+
+
 layout(set = 1, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
@@ -49,15 +54,14 @@ layout(set = 1, binding = 0) uniform CameraUBO {
 } cb;
 
 layout(push_constant) uniform PushConstant {
-    int totalGaussians;
     uint kvCapacity;
 } push;
 
 mat3 quaternionToRotationMatrix(vec4 q) {
-    float x = q.x;
-    float y = q.y;
-    float z = q.z;
-    float w = q.w;
+    float x = q.y;
+    float y = q.z;
+    float z = q.w;
+    float w = q.x;
 
     return mat3(
         1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w),
@@ -68,11 +72,16 @@ mat3 quaternionToRotationMatrix(vec4 q) {
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     
     // 유효한 가우시안 개수 체크
-    if (idx >= push.totalGaussians) return;
+    if (idx >= totalGaussians) return;
 
     Gaussian g = gaussians[idx];
 
@@ -145,7 +154,7 @@ void main() {
     // 결과를 전용 SSBO에 저장
     projectedGaussians[idx].pos2d = screen_pos;
     projectedGaussians[idx].conics = conics;
-    projectedGaussians[idx].opacity = g.scaleOpacity.w;
+    projectedGaussians[idx].opacity = sigmoid(g.scaleOpacity.a);
     projectedGaussians[idx].color = g.color;
 
     uint n_cols = (uint(cb.viewportSize.x) + 15u) >> 4u;

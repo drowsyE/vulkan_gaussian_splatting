@@ -1,0 +1,105 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+struct Gaussian {
+    vec3 mean;        
+    float pad1;
+    vec4 scaleOpacity; 
+    vec4 rot;          // quatarnion
+    vec3 color;        // will be changed to SH coefficients soon
+    float pad;
+};
+
+layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; }; // must be compacted!
+layout(set = 0, binding = 7) buffer GaussianCounter { uint count; };
+layout(set = 1, binding = 9)  buffer GradPos2dBlock { float gradPos2d[]; }; // read uint as float
+layout(set = 1, binding = 14) buffer ContributionCountBlock { uint contributionCount[]; };
+layout(set = 1, binding = 12) buffer ActiveGaussianCounter { uint active_count; };
+
+layout(push_constant) uniform PushConstants {
+    float sceneExt;
+    uint maxGaussians;
+    uint step;
+} p;
+
+const float pos2d_threshold = 0.0002;
+
+// [0, 1] 범위의 Uniform 난수를 생성하는 함수, for box-muller transform
+float uintToFloat(uint x) {
+    return float(x) * (1.0 / 4294967296.0); // 2^32로 나눔
+}
+
+uint pcg_hash(uint seed) {
+    uint state = seed * 747796405u + 289133245u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+vec3 sampleNormal3D(uint seed) {
+    
+    float u1 = uintToFloat(pcg_hash(seed));
+    float u2 = uintToFloat(pcg_hash(seed + 1u));
+    float u3 = uintToFloat(pcg_hash(seed + 2u));
+    float u4 = uintToFloat(pcg_hash(seed + 3u));
+
+    float r1 = sqrt(-2.0 * log(max(u1, 1e-7)));
+    float x = r1 * cos(2.0 * 3.14159265 * u2);
+    float y = r1 * sin(2.0 * 3.14159265 * u2);
+
+    float r2 = sqrt(-2.0 * log(max(u3, 1e-7)));
+    float z = r2 * cos(2.0 * 3.14159265 * u4);
+
+    return vec3(x, y, z);
+}
+
+vec3 rotate_vector(vec4 q, vec3 v) {
+    // q = [w, x, y, z]
+    float w = q.x;      
+    vec3 val = q.yzw;
+
+    vec3 t = 2.0 * cross(val, v);
+    return v + w * t + cross(val, t);
+}
+
+void main() {
+    if (p.step % 100 != 0) return;
+
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= active_count) return;
+
+    if (p.step % 3000 == 0) { gaussians[id].scaleOpacity.a = -2.0; } // logit(0.12) \approx -2.0
+
+    Gaussian g = gaussians[id];
+    vec2 g2d = vec2(gradPos2d[2*id], gradPos2d[2*id+1]);
+    float gradNorm = length(g2d) / max(1.0, float(contributionCount[id]));
+
+    float scale_threshold = p.sceneExt * 0.1;
+
+    if (gradNorm > pos2d_threshold) {
+        float max_s = max(g.scaleOpacity.x, max(g.scaleOpacity.y, g.scaleOpacity.z));
+        float s = exp(max_s);
+
+        Gaussian new_gaussian = g;
+        if (s < scale_threshold) {
+            // CLONE
+            // No additional movement for cloning based on screen-space gradients
+        } else {
+            // SPLIT
+            float log16 = log(1.6);
+            new_gaussian.scaleOpacity.xyz -= log16; // since scale is log scaled
+            gaussians[id].scaleOpacity.xyz -= log16;
+            
+            vec3 noise = sampleNormal3D(id + p.step);
+            vec3 world_offset = rotate_vector(g.rot, noise * exp(g.scaleOpacity.xyz));
+
+            new_gaussian.mean  -= world_offset;
+            gaussians[id].mean += world_offset;
+        }
+        // critical section
+        uint write_idx = atomicAdd(count, 1);
+        if (write_idx >= p.maxGaussians) return;
+        gaussians[write_idx] = new_gaussian;
+        // end of critical section
+    }
+}

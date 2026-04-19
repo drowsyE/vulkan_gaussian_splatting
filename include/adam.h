@@ -18,8 +18,6 @@ struct AdamPush {
     float beta2;        // 보통 0.999
     float epsilon;      // 보통 1e-8
     uint32_t step;      // 현재 트레이닝 스텝 (1부터 시작)
-    
-    uint32_t numGaussians; // read only, updates in host
 };
 
 

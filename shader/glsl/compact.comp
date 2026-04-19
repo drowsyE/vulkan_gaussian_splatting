@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+struct Gaussian {
+    vec3 mean;        
+    float pad1;
+    vec4 scaleOpacity; 
+    vec4 rot;          
+    vec3 color;        
+    float pad2;
+};
+
+struct AdamState {
+    vec4 posR_m; 
+    vec4 posR_v;
+    vec4 scaleOpacity_m;
+    vec4 scaleOpacity_v;
+    vec4 rot_m;
+    vec4 rot_v;
+    vec2 colorGB_m;
+    vec2 colorGB_v;
+};
+
+layout(set = 0, binding = 0) buffer SourceGaussians { Gaussian src_gaussians[]; };
+layout(set = 2, binding = 0) buffer DestinationGaussians { Gaussian dst_gaussians[]; };
+layout(set = 1, binding = 10) buffer SourceAdam { AdamState src_adam[]; };
+layout(set = 2, binding = 1) buffer DestinationAdam { AdamState dst_adam[]; };
+layout(set = 0, binding = 7) buffer NewCount { uint count; }; // for totalGaussians sync
+layout(set = 1, binding = 11) buffer readonly Flags { uint flags[]; };      // original 0/1 flags
+layout(set = 1, binding = 13) buffer readonly ScanResult { uint indices[]; }; // exclusive scan result
+layout(set = 1, binding = 12) buffer readonly ActiveCount { uint active_count; };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= active_count) return;
+
+    if (flags[id] == 1) {
+        uint dstIdx = indices[id];
+        dst_gaussians[dstIdx] = src_gaussians[id];
+        dst_adam[dstIdx] = src_adam[id];
+        
+        // The last valid thread will update the counter
+        // (This is not very efficient but work-around for now if we don't have a better way to get final count)
+        // Actually, atomicMax or just letting compact.comp finish and then reading back is better.
+        atomicMax(count, dstIdx + 1);
+    }
+}

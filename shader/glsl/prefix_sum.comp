@@ -1,0 +1,55 @@
+// Blelloch sum (exclusive scan)
+
+#version 450
+
+layout(local_size_x = 256) in; // 워크그룹 크기 (n = 256 * 2 = 512 처리 가능)
+
+layout(set = 0, binding = 0) buffer dataBuffer { uint data[]; };
+
+shared uint temp[512]; // 동일한 워크 그룹에 있는 쓰레드들은 공유할 수 있는 공유 메모리
+
+void main() {
+
+    uint thid = gl_LocalInvocationID.x;
+    uint n = gl_WorkGroupSize.x << 1;
+
+    // 데이터를 공유 메모리로 로드
+    temp[2 * thid] = data[2 * thid];
+    temp[2 * thid + 1] = data[2 * thid + 1];
+
+    // Up-sweep
+    uint offset = 1;
+    for (uint d = n>>1; d > 0; d <<= 1) {
+        barrier();
+        if (thid < d) {
+            uint li = offset * (2 * thid + 1) - 1;
+            uint ri = offset * (2 * thid + 2) - 1;
+
+            temp[ri] += temp[li];
+        }
+        offset <<= 1;
+    }
+    
+
+    // Down-sweep
+    if (thid == 0) { 
+        temp[n-1] = 0; // temp[n-1] = temp[0] for inclusive scan !
+    }
+
+    for (uint d = 1; d < n; d <<= 1) {
+        offset >>= 1;
+        barrier();
+        if (thid < d) {
+            uint li = offset * (2 * thid + 1) - 1;
+            uint ri = offset * (2 * thid + 2) - 1;
+
+            uint v = temp[li];
+            temp[li] = temp[ri];
+            temp[ri] += v;
+        }
+    }   
+    barrier();
+
+    data[2 * thid] = temp[2 * thid];
+    data[2 * thid + 1] = temp[2 * thid + 1];   
+}

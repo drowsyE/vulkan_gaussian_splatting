@@ -58,6 +58,7 @@ layout(set = 1, binding = 4, rgba32f) uniform readonly image2D curSSIMStats;
 layout(set = 1, binding = 5, rg32f) uniform readonly image2D gtSSIMStats; 
 layout(set = 1, binding = 8) buffer GradGaussiansBlock { GaussianGrad gradGaussians[]; };
 layout(set = 1, binding = 9) buffer GradPos2dBlock { uint gradPos2d[]; }; // cpp에서 float*로 읽으면 됨
+layout(set = 1, binding = 14) buffer ContributionCountBlock { uint contributionCount[]; };
 
 // spinlock style atomic add (Macro implementation for buffer resolution)
 #define atomicAddFloat(mem, data) \
@@ -194,9 +195,8 @@ void main() {
         // --- 2. dL/dc (Color에 대한 미분) ---
         vec3 dL_dc = dL_dC * (T_i * alpha);
 
-        // --- 3. dL/do (Opacity에 대한 미분) ---
-        // alpha_prime = opacity * G 이므로 d_alpha/d_opacity = G
-        float dL_do = dL_da * G;
+        // alpha_prime = sigmoid(opacity) * G 이므로 d_alpha/d_opacity = sigmoid(op)*(1-sigmoid(op)) * G
+        float dL_do = dL_da * G * g.opacity * (1.0 - g.opacity);
 
         // --- 4. dL/dpos2d (2D 중심점에 대한 미분) ---
         // d_alpha/d_G = opacity, d_G/d_power = G, d_power/d_pos2d = M * d
@@ -292,6 +292,7 @@ void main() {
         // --- [최종] 이제 각 가우시안의 global index에 dL들을 atomicAdd ---
         atomicAddFloat(gradPos2d[gIdx * 2], dL_dpos2d.x);
         atomicAddFloat(gradPos2d[gIdx * 2 + 1], dL_dpos2d.y);
+        atomicAdd(contributionCount[gIdx], 1);
 
         atomicAddFloat(gradGaussians[gIdx].opacity, dL_do);
 

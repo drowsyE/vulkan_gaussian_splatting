@@ -22,6 +22,7 @@ struct AdamState {
 };
 
 layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; };
+layout(set = 0, binding = 7) buffer readonly GaussianCounter { uint numGaussians; };
 layout(set = 1, binding = 8) buffer Gradients { Gaussian grads[]; };
 layout(set = 1, binding = 10) buffer AdamMoms { AdamState moms[]; }; // m, v 저장
 
@@ -32,9 +33,6 @@ layout(push_constant) uniform PushConstant {
     float beta2;        // 보통 0.999
     float epsilon;      // 보통 1e-8
     uint  step;         // 현재 트레이닝 스텝 (1부터 시작)
-
-    // etc
-    uint numGaussians;
 } p;
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -57,7 +55,8 @@ vec2 updateAdam2(vec2 g, inout vec2 m, inout vec2 v, float m_corr, float v_corr)
 
 void main() {
     uint gIdx = gl_GlobalInvocationID.x;
-    if (gIdx >= p.numGaussians) return;
+    // MUST BE CHANGED
+    if (gIdx >= numGaussians) return;
 
     // 1. Bias correction factors
     float m_corr = 1.0 - pow(p.beta1, float(p.step));

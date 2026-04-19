@@ -37,23 +37,26 @@ std::vector<Image> readImages(const char *path) {
     file.read((char *)&num_images, sizeof(num_images));
 
     std::vector<Image> images;
+    double q_temp[4], t_temp[3];
+
     for (int i = 0; i < num_images; i++) {
         Image img;
         file.read((char *)&img.image_id, sizeof(img.image_id));
-        file.read((char *)img.q, sizeof(img.q));
-        file.read((char *)img.t, sizeof(img.t));
+        file.read((char *)q_temp, sizeof(q_temp)); // colmap format : [w x y z]
+        file.read((char *)t_temp, sizeof(t_temp));
         file.read((char *)&img.camera_id, sizeof(img.camera_id));
+        img.q = glm::quat(q_temp[0], q_temp[1], q_temp[2], q_temp[3]);
+        img.t = glm::vec3(t_temp[0], t_temp[1], t_temp[2]);
 
         char c;
         while (file.get(c) && c != '\0') {
-        img.name += c;
+            img.name += c;
         }
 
         // skip points2D
         uint64_t num_points2D;
         file.read((char *)&num_points2D, sizeof(num_points2D));
-        file.ignore(num_points2D *
-                    (2 * sizeof(double) + sizeof(int64_t))); // x, y, id
+        file.ignore(num_points2D * (2 * sizeof(double) + sizeof(int64_t))); // x, y, id
 
         images.push_back(img);
     }
@@ -99,7 +102,7 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         Gaussian3D g;
         g.pos = glm::vec3(p.x, p.y, p.z);
         g.pad1 = 0.0f;
-        g.scaleOpacity = glm::vec4(-3.f, -3.f, -3.f, 0.15f); // scale is log scaled
+        g.scaleOpacity = glm::vec4(-3.f, -3.f, -3.f, -2.1972f); // scale is log scaled, opacity is logit scaled
         // Default color: normalized from points (if available) or white for debug
         g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
         // g.color = glm::vec3(1.f, 1.f, 1.f);

@@ -1,0 +1,65 @@
+#version 450
+
+// Blelloch local scan with block sum export
+layout(local_size_x = 256) in; 
+
+layout(set = 0, binding = 0) buffer Data { uint data[]; };
+layout(set = 0, binding = 1) buffer BlockSums { uint blockSums[]; };
+
+shared uint temp[512]; 
+
+void main() {
+    uint thid = gl_LocalInvocationID.x;
+    uint blockId = gl_WorkGroupID.x;
+    uint n = gl_WorkGroupSize.x << 1;
+    uint globalOff = blockId * n;
+
+    // Load to shared memory
+    if (globalOff + 2 * thid < data.length())
+        temp[2 * thid] = data[globalOff + 2 * thid];
+    else
+        temp[2 * thid] = 0;
+
+    if (globalOff + 2 * thid + 1 < data.length())
+        temp[2 * thid + 1] = data[globalOff + 2 * thid + 1];
+    else
+        temp[2 * thid + 1] = 0;
+
+    // Up-sweep
+    uint offset = 1;
+    for (uint d = n >> 1; d > 0; d >>= 1) {
+        barrier();
+        if (thid < d) {
+            uint li = offset * (2 * thid + 1) - 1;
+            uint ri = offset * (2 * thid + 2) - 1;
+            temp[ri] += temp[li];
+        }
+        offset <<= 1;
+    }
+
+    // Export block sum before resetting last element for exclusive scan
+    if (thid == 0) {
+        blockSums[blockId] = temp[n - 1];
+        temp[n - 1] = 0;
+    }
+
+    // Down-sweep
+    for (uint d = 1; d < n; d <<= 1) {
+        offset >>= 1;
+        barrier();
+        if (thid < d) {
+            uint li = offset * (2 * thid + 1) - 1;
+            uint ri = offset * (2 * thid + 2) - 1;
+            uint v = temp[li];
+            temp[li] = temp[ri];
+            temp[ri] += v;
+        }
+    }
+    barrier();
+
+    // Write back
+    if (globalOff + 2 * thid < data.length())
+        data[globalOff + 2 * thid] = temp[2 * thid];
+    if (globalOff + 2 * thid + 1 < data.length())
+        data[globalOff + 2 * thid + 1] = temp[2 * thid + 1];
+}

@@ -79,6 +79,7 @@ private:
   VkBuffer pingpongBuffer;
   VkBuffer counterBuffer;
   VkBuffer indirectArgsBuffer;
+  VkBuffer gaussianCountBuffer;
 
   VkDeviceMemory gaussianBufferMemory;
   VkDeviceMemory projectedGaussianBufferMemory;
@@ -87,6 +88,7 @@ private:
   VkDeviceMemory pingpongBufferMemory;
   VkDeviceMemory counterBufferMemory;
   VkDeviceMemory indirectArgsBufferMemory;
+  VkDeviceMemory gaussianCountBufferMemory;
 
   uint32_t num_tiles;
   VkBuffer tileRangeBuffer;
@@ -95,7 +97,7 @@ private:
   CameraUBO camUBO;
   glm::vec3 cameraPos{0.0f, 0.0f, 5.0f};
   glm::vec3 cameraFront{0.0f, 0.0f, -1.0f};
-  glm::vec3 cameraUp{0.0f, 1.0f, 0.0f};
+  glm::vec3 cameraUp{0.0f, -1.0f, 0.0f};
   float yaw{-90.0f};
   float pitch{0.0f};
   std::vector<VkBuffer> cameraBuffers; // need to be resized
@@ -120,6 +122,8 @@ private:
   VkPipeline rasterComputePipeline;
   VkPipelineLayout argpassComputePipelineLayout;
   VkPipeline argpassComputePipeline;
+  VkPipelineLayout argpass2PipelineLayout;
+  VkPipeline argpass2Pipeline;
 
   void drawFrame();
 
@@ -144,10 +148,10 @@ private:
   template <typename T>
   void createStorageBuffer(std::vector<T> &srcBuffer, VkBuffer &buffer,
                            VkDeviceMemory &bufferMemory);
-  
+
   template <typename T>
   void createStorageBuffer(std::vector<T> &srcBuffer, VkBufferUsageFlags usage,
-                          VkBuffer &buffer, VkDeviceMemory &bufferMemory);
+                           VkBuffer &buffer, VkDeviceMemory &bufferMemory);
 
   void createImage(uint32_t width, uint32_t height, VkFormat imageFormat,
                    VkImageUsageFlags imageUsage,
@@ -177,8 +181,11 @@ private:
   void endSingleTimeComputeCommands(VkCommandBuffer commandBuffer);
   void updateCameraUBO(float deltaTime);
   void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
-  void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
-  void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
+  void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width,
+                         uint32_t height);
+  void transitionImageLayout(VkImage image, VkFormat format,
+                             VkImageLayout oldLayout, VkImageLayout newLayout);
+  float calculateSceneExtent(std::vector<Image> &images);
 };
 
 } // namespace Core

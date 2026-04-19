@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+struct Gaussian {
+    vec3 mean;        
+    float pad1;
+    vec4 scaleOpacity; 
+    vec4 rot;          
+    vec3 color;        
+    float pad2;
+};
+
+layout(set = 0, binding = 0)  buffer readonly Gaussians { Gaussian gaussians[]; };
+layout(set = 1, binding = 11) buffer writeonly FlagBuffer { uint flags[]; };
+layout(set = 1, binding = 12) buffer readonly ActiveGaussianCounter { uint active_count; };
+
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= active_count) {
+        if (id < flags.length()) flags[id] = 0;
+        return;
+    }
+
+    float opacity_raw = gaussians[id].scaleOpacity.a;
+    if (sigmoid(opacity_raw) > 0.005) {
+        flags[id] = 1;
+    } else {
+        flags[id] = 0;
+    }
+}
