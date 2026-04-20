@@ -58,10 +58,10 @@ layout(push_constant) uniform PushConstant {
 } push;
 
 mat3 quaternionToRotationMatrix(vec4 q) {
-    float x = q.y;
-    float y = q.z;
-    float z = q.w;
-    float w = q.x;
+    float x = q.x;
+    float y = q.y;
+    float z = q.z;
+    float w = q.w;
 
     return mat3(
         1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w),

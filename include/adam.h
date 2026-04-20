@@ -13,7 +13,12 @@ struct AdamState {
 };
 
 struct AdamPush {
-    float lr;           // Learning Rate (기본값 보통 0.00016)
+    float pos_lr;       
+    float rot_lr;
+    float scale_lr;
+    float opacity_lr;
+    float color_lr;
+
     float beta1;        // 보통 0.9
     float beta2;        // 보통 0.999
     float epsilon;      // 보통 1e-8

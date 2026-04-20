@@ -51,6 +51,12 @@ int main(int argc, char** argv) {
     if (runColmap) {
         // Sparse reconstruction via COLMAP
         std::cout << "Running COLMAP reconstruction pipeline..." << std::endl;
+
+        // Initialize existing COLMAP files and directories
+        fs::remove("../database.db");
+        fs::remove_all("../sparse");
+        fs::remove_all("../dense");
+
         system("colmap feature_extractor --database_path ../database.db --image_path ../images");
         system("colmap exhaustive_matcher --database_path ../database.db");
         std::string sparsePath = "../sparse";
@@ -59,25 +65,43 @@ int main(int argc, char** argv) {
         }
         system("colmap mapper --database_path ../database.db --image_path ../images --output_path ../sparse");
         system("colmap image_undistorter --image_path ../images --input_path ../sparse/0 --output_path ../dense");
+        return 0;
     }
 
     // Default smart behavior if no specific mode is chosen
-    if (!trainMode && !viewMode) {;
+    if (!trainMode && !viewMode) {
         loadPath = "trained_gaussians.bin";
         if (!fs::exists(loadPath)) {
             loadPath = "build/trained_gaussians.bin";
         }
+        
+        std::string datasetPath = "../dense/sparse/points3D.bin";
+        
         if (fs::exists(loadPath)) {
-            viewMode = true;
-            std::cout << "No arguments provided. Found default model: " << loadPath << std::endl;
+            bool datasetUpdated = false;
+            if (fs::exists(datasetPath)) {
+                auto modelTime = fs::last_write_time(loadPath);
+                auto datasetTime = fs::last_write_time(datasetPath);
+                if (datasetTime > modelTime) {
+                    datasetUpdated = true;
+                }
+            }
+            
+            if (datasetUpdated) {
+                trainMode = true;
+                std::cout << "Dataset has been updated recently. Starting training mode..." << std::endl;
+            } else {
+                viewMode = true;
+                std::cout << "No arguments provided. Found default model: " << loadPath << std::endl;
+            }
         } else {
             trainMode = true;
             std::cout << "No arguments provided and no default model found. Starting training mode..." << std::endl;
         }
     }
 
-    std::vector<Core::Camera> cameras = Core::readCameras("../sparse/0/cameras.bin");
-    std::vector<Core::Image> images = Core::readImages("../sparse/0/images.bin");
+    std::vector<Core::Camera> cameras = Core::readCameras("../dense/sparse/cameras.bin");
+    std::vector<Core::Image> images = Core::readImages("../dense/sparse/images.bin");
 
     if (viewMode) {
         if (loadPath.empty()) loadPath = "trained_gaussians.bin";
@@ -98,7 +122,7 @@ int main(int argc, char** argv) {
     }
 
     // Training mode
-    std::vector<Core::Point> points = Core::readPoints("../sparse/0/points3D.bin");
+    std::vector<Core::Point> points = Core::readPoints("../dense/sparse/points3D.bin");
     printf("Number of points : %zu\n", points.size());
     
     Core::Engine engine(cameras[0].width, cameras[0].height, scale, points);

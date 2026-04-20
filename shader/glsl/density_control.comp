@@ -23,7 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint step;
 } p;
 
-const float pos2d_threshold = 0.0002;
+const float pos2d_threshold = 0.005; // Increased for pixel-space gradients
 
 // [0, 1] 범위의 Uniform 난수를 생성하는 함수, for box-muller transform
 float uintToFloat(uint x) {

@@ -1,4 +1,7 @@
 #version 450
+// #extension GL_KHR_shader_subgroup_arithmetic : enable
+// #extension GL_KHR_shader_subgroup_basic : enable
+
 
 // parameters to be updated : mean, scale, opacity, rotation, color
 
@@ -184,7 +187,7 @@ void main() {
         float alpha = min(0.99, g.opacity * G);
         if (alpha < 1.0/255.0) continue; 
 
-        T_last /= (1 - alpha + 1e-7);
+        T_last /= max(0.01, 1.0 - alpha);
         float T_i = T_last;
 
         // --- 1. dL/dalpha_prime (Effective Alpha에 대한 미분) ---
@@ -284,11 +287,11 @@ void main() {
         float dL_dqz = 2.0 * w * (U[0][1] - U[1][0]) + 2.0 * x * (U[2][0] + U[0][2]) + 2.0 * y * (U[2][1] + U[1][2]) - 4.0 * z * (U[0][0] + U[1][1]);
 
         vec4 dL_dq = vec4(dL_dqx, dL_dqy, dL_dqz, dL_dr);
+
         
         // --- [업데이트] 다음(앞쪽) 가우시안을 위해 K(accum_Tac) 갱신 ---
         accum_Tac += T_i * alpha * g.color;
         
-
         // --- [최종] 이제 각 가우시안의 global index에 dL들을 atomicAdd ---
         atomicAddFloat(gradPos2d[gIdx * 2], dL_dpos2d.x);
         atomicAddFloat(gradPos2d[gIdx * 2 + 1], dL_dpos2d.y);

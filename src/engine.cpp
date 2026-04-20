@@ -1100,9 +1100,12 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipeline);
 		// Generate random solid background color
-		float bgR = static_cast<float>(rand()) / RAND_MAX;
-		float bgG = static_cast<float>(rand()) / RAND_MAX;
-		float bgB = static_cast<float>(rand()) / RAND_MAX;
+		// float bgR = static_cast<float>(rand()) / RAND_MAX;
+		// float bgG = static_cast<float>(rand()) / RAND_MAX;
+		// float bgB = static_cast<float>(rand()) / RAND_MAX;
+		float bgR = 0;
+		float bgG = 0;
+		float bgB = 0;
 		RasterPush rasterPush{KVCapacity, bgR, bgG, bgB};
 		vkCmdPushConstants(cmdbuf2, rasterTrainComputePipelineLayout,
 						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RasterPush),
@@ -1181,7 +1184,17 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 		// WP : MUST CHANGE TO INDIRECT DISPATCH since totalGaussian will be
 		// changed!! (Use gaussianCountBuffer)
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, adamComputePipeline);
-		AdamPush adamPush{lr, beta1, beta2, eps, steps};
+		AdamPush adamPush{
+			lr,         // pos_lr (use passed lr as default 0.00016)
+			0.001f,     // rot_lr
+			0.005f,     // scale_lr
+			0.05f,      // opacity_lr
+			0.0025f,    // color_lr
+			beta1, 
+			beta2, 
+			eps, 
+			steps
+		};
 		vkCmdPushConstants(cmdbuf2, adamComputePipelineLayout,
 							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AdamPush),
 							&adamPush);
@@ -1542,7 +1555,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 	render_width = src_width * scale;
 	render_height = src_height * scale;
 	totalGaussians = points.size();
-	maxGaussians = totalGaussians << 3;
+	maxGaussians = totalGaussians << 5;
 	std::vector<Gaussian3D> src_tmp = gaussianFromPoints(points, totalGaussians, maxGaussians);
 
 	createStorageBuffer<Gaussian3D>(src_tmp, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, gaussianBuffer, gaussianBufferMemory);
@@ -1638,7 +1651,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 	render_width = src_width * scale;
 	render_height = src_height * scale;
 	totalGaussians = gaussians.size();
-	maxGaussians = totalGaussians << 3;
+	maxGaussians = totalGaussians;
 
 	createStorageBuffer<Gaussian3D>(gaussians, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 									gaussianBuffer, gaussianBufferMemory);

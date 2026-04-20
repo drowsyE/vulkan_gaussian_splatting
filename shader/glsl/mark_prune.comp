@@ -28,7 +28,7 @@ void main() {
     }
 
     float opacity_raw = gaussians[id].scaleOpacity.a;
-    if (sigmoid(opacity_raw) > 0.005) {
+    if (sigmoid(opacity_raw) > 0.05) {
         flags[id] = 1;
     } else {
         flags[id] = 0;

@@ -34,7 +34,7 @@ typedef struct Gaussian3D {
     glm::vec3 pos;       
     float pad1;          
     glm::vec4 scaleOpacity; // x, y, z, opacity
-    glm::vec4 rot;       
+    glm::quat rot;          // quaternion [x, y, z, w]
     glm::vec3 color;     
     float pad2;          
 } Gaussian3D;

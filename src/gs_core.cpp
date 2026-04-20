@@ -106,7 +106,7 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         // Default color: normalized from points (if available) or white for debug
         g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
         // g.color = glm::vec3(1.f, 1.f, 1.f);
-        g.rot = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // Identity rotation (x,y,z=0, w=1)
+        g.rot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // Identity (w=1, x=y=z=0) -> memory [0,0,0,1]
         g.pad2 = 0.0f;
 
         gaussians[i] = g;
