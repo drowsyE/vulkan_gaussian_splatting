@@ -29,13 +29,13 @@ void main() {
     if (id >= kvCount) return;
 
     uint currentKey = keys[id];
-    uint currentTile = uint(currentKey >> 16);
+    uint currentTile = uint(currentKey >> 18u);
     currentTile = min(currentTile, push.num_tiles - 1);
 
     if (id == 0) {
         ranges[currentTile].start = 0;
     } else {
-        uint prevTile = uint(keys[id - 1] >> 16);
+        uint prevTile = uint(keys[id - 1] >> 18u);
         prevTile = min(prevTile, push.num_tiles - 1);
         if (currentTile != prevTile) {
             ranges[prevTile].end = id;      // 이전 타일 종료

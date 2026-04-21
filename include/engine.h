@@ -24,10 +24,10 @@ public:
   ~Engine();
 
   void run();
-  void train(std::vector<Image> &images, int32_t iterations,
+  void train(std::vector<Image> &images, std::vector<Camera> &cameras, int32_t iterations,
              float learning_rate = 1e-4, float beta1 = 0.9, float beta2 = 0.999,
              float eps = 1e-8, float lambda = 0.2);
-  void setCameraFromColmap(const Image &image);
+  void setCameraFromColmap(const Image &image, const Camera *camera = nullptr);
 
 private:
   static constexpr int MAX_FRAME_IN_FLIGHT = 2;

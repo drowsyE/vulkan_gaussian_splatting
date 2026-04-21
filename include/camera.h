@@ -12,6 +12,6 @@ typedef struct CameraUBO {
     alignas(4)  float focalY;
 } CameraUBO;
 
-void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float width, float height, glm::vec3 up);
+void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float width, float height, glm::vec3 up, float fx = -1.0f, float fy = -1.0f);
 
 }

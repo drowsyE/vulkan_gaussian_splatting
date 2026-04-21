@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     }
     
     std::cout << "Starting training for " << iterations << " iterations with scale " << scale << "..." << std::endl;
-    engine.train(images, iterations);
+    engine.train(images, cameras, iterations);
 
     return 0;
 }

@@ -5,8 +5,8 @@ struct Gaussian {
     float pad1;
     vec4 scaleOpacity; 
     vec4 rot;          // quaternion
-    vec3 color;        // will be changed to SH coefficients soon
-    float pad;
+    vec3 color;        
+    uint gradCount;   // Packed per-iteration contribution count
 };
 
 // Adam의 상태를 저장하는 버퍼 (가우시안 개수만큼 할당)
@@ -60,17 +60,29 @@ vec2 updateAdam2(vec2 g, inout vec2 m, inout vec2 v, float m_corr, float v_corr,
 
 void main() {
     uint gIdx = gl_GlobalInvocationID.x;
-    // MUST BE CHANGED
     if (gIdx >= numGaussians) return;
+
+    Gaussian param = gaussians[gIdx];
+
+    // NaN Protection: If any parameter is NaN, reset and skip
+    if (any(isnan(param.mean)) || any(isnan(param.scaleOpacity)) || any(isnan(param.rot)) || any(isnan(param.color))) {
+        gaussians[gIdx].mean = vec3(0.0);
+        gaussians[gIdx].scaleOpacity = vec4(0.0, 0.0, 0.0, -10.0); // Transparent
+        gaussians[gIdx].rot = vec4(0.0, 0.0, 0.0, 1.0);
+        gaussians[gIdx].color = vec3(0.0);
+        return;
+    }
 
     // 1. Bias correction factors
     float m_corr = 1.0 - pow(p.beta1, float(p.step));
     float v_corr = 1.0 - pow(p.beta2, float(p.step));
 
-    // 2. Load state
+    // 2. Load gradients (use raw accumulated gradients, NOT averaged)
+    // Original 3DGS does NOT normalize by pixel count.
+    // Adam's second moment naturally handles gradient magnitude.
     Gaussian grad = grads[gIdx];
+
     AdamState mom = moms[gIdx];
-    Gaussian param = gaussians[gIdx];
 
     // 3. Pack parameters and gradients
     vec4 grad_posR = vec4(grad.mean, grad.color.r);
@@ -84,8 +96,22 @@ void main() {
     vec2 param_colorGB = vec2(param.color.g, param.color.b);
 
     // 4. Update
-    // Position (mean) and Color.R share pos_lr and color_lr
     vec4 posR_lr = vec4(vec3(p.pos_lr), p.color_lr);
+    
+    // Safety check: Skip update if gradients are invalid
+    if (any(isnan(grad_posR)) || any(isinf(grad_posR)) ||
+        any(isnan(grad_scaleOpacity)) || any(isinf(grad_scaleOpacity)) ||
+        any(isnan(grad_rot)) || any(isinf(grad_rot)) ||
+        any(isnan(grad_colorGB)) || any(isinf(grad_colorGB))) {
+        // Just reset gradients and skip update
+        grads[gIdx].mean = vec3(0.0);
+        grads[gIdx].scaleOpacity = vec4(0.0);
+        grads[gIdx].rot = vec4(0.0);
+        grads[gIdx].color = vec3(0.0);
+        grads[gIdx].gradCount = 0u;
+        return;
+    }
+
     param_posR -= updateAdam4(grad_posR, mom.posR_m, mom.posR_v, m_corr, v_corr, posR_lr);
     
     vec4 scaleOpacity_lr = vec4(vec3(p.scale_lr), p.opacity_lr);
@@ -94,14 +120,22 @@ void main() {
     param_rot -= updateAdam4(grad_rot, mom.rot_m, mom.rot_v, m_corr, v_corr, vec4(p.rot_lr));
     
     param_colorGB -= updateAdam2(grad_colorGB, mom.colorGB_m, mom.colorGB_v, m_corr, v_corr, vec2(p.color_lr));
+
+    // Clamp color to [0, 1]
+    param_posR.w = clamp(param_posR.w, 0.0, 1.0);
+    param_colorGB = clamp(param_colorGB, vec2(0.0), vec2(1.0));
     
     // Normalize quaternion
     float len_rot = length(param_rot);
     if (len_rot > 0.0) {
         param_rot /= len_rot;
     } else {
-        param_rot = vec4(0.0, 0.0, 0.0, 1.0); // Identity (x,y,z=0, w=1)
+        param_rot = vec4(0.0, 0.0, 0.0, 1.0);
     }
+
+    // Clamp scales to prevent explosion (log-space clamping)
+    // -10.0 to 5.0 is a typical range for log-scale
+    param_scaleOpacity.xyz = clamp(param_scaleOpacity.xyz, vec3(-15.0), vec3(5.0));
 
     // 5. Unpack and write back parameters
     param.mean = param_posR.xyz;
@@ -119,4 +153,5 @@ void main() {
     grads[gIdx].scaleOpacity = vec4(0.0);
     grads[gIdx].rot = vec4(0.0);
     grads[gIdx].color = vec3(0.0);
+    grads[gIdx].gradCount = 0u;
 }

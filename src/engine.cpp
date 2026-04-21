@@ -13,6 +13,7 @@
 #include "stb_image_resize2.h"
 
 #include <iostream>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -71,6 +72,9 @@ void Engine::drawFrame() {
 	VkCommandBuffer cmdbuf = computeCommandBuffers[currentFrame];
 	VkCommandBuffer cmdbuf2 = computeCommandBuffers2[currentFrame];
 	VkCommandBuffer graphicsCmdbuf = graphicsCommandBuffers[currentFrame];
+	
+	uint32_t n_tiles_col = (render_width + 15) / 16;
+	uint32_t n_tiles_row = (render_height + 15) / 16;
 
   	// --- Synchronization & Resets ---
 	vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
@@ -117,9 +121,10 @@ void Engine::drawFrame() {
 
 	// gaussianCountBuffer is pre-initialized in generator
 	vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
+	ProjPush projPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
 	vkCmdPushConstants(cmdbuf, projComputePipelineLayout,
-						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KVCapacity),
-						&KVCapacity);
+						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ProjPush),
+						&projPush);
 	VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[currentFrame]};
 	vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
 							projComputePipelineLayout,
@@ -191,9 +196,10 @@ void Engine::drawFrame() {
 						0, 1, &postRangeBarrier, 0, nullptr, 1, &imageToGeneralBarrier);
 
 	vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
+	ProjPush rasterPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
 	vkCmdPushConstants(cmdbuf2, rasterComputePipelineLayout,
-						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KVCapacity),
-						&KVCapacity);
+						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ProjPush),
+						&rasterPush);
 	vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
 							rasterComputePipelineLayout, 0, 2, bindDescriptorSets,
 							0, nullptr);
@@ -310,7 +316,7 @@ void Engine::drawFrame() {
 }
 
 // lambda -> Loss : L1 loss * (1-lambda) + SSIM loss * lambda
-void Engine::train(std::vector<Image> &images, int32_t iterations,
+void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int32_t iterations,
 					float lr, float beta1, float beta2, float eps, float lambda) {
 
 	if (lambda < 0. || lambda > 1.) {
@@ -318,6 +324,9 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 	}
 
 	vkDeviceWaitIdle(device);
+	
+	uint32_t n_tiles_col = (render_width + 15) / 16;
+	uint32_t n_tiles_row = (render_height + 15) / 16;
 
 	std::vector<std::vector<uint8_t>> gtImageCache(images.size());
 
@@ -471,6 +480,8 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 	transitionImageLayout(tempSSIMStats, VK_FORMAT_R32G32B32A32_SFLOAT,
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 	transitionImageLayout(tempSSIMStats2, VK_FORMAT_R32_SFLOAT,
+						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+	transitionImageLayout(offscreenImages[0], VK_FORMAT_R8G8B8_UNORM,
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
 	// initialize buffers
@@ -860,9 +871,14 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 
 	VkPipeline markPrunePipeline;
 	VkPipelineLayout markPrunePipelineLayout;
+	VkPushConstantRange prunePushRange{};
+	prunePushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	prunePushRange.offset = 0;
+	prunePushRange.size = sizeof(float); // sceneExtent
 	createComputePipeline(markPrunePipeline, markPrunePipelineLayout,
-						"../shader/spv/mark_prune.spv", 0, nullptr,
+						"../shader/spv/mark_prune.spv", 1, &prunePushRange,
 						static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
+
 
 	VkPipeline scanLocalPipeline;
 	VkPipelineLayout scanLocalPipelineLayout;
@@ -902,6 +918,7 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 	float sceneExt = calculateSceneExtent(images);
 
 	uint32_t steps = 0;
+	const int total_iterations = iterations; // Save original for LR decay
 	int frameIdx = 0; // Use symmetric 1-frame rendering for training instead of
 	// MAX_FRAME_IN_FLIGHT to prevent data races
 	while (iterations--) {
@@ -918,10 +935,20 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 		vkResetCommandBuffer(cmdbuf2, 0);
 
 		// --- Resource Updates (Move after Fence Wait to avoid Data Race) ---
+		float current_lr = lr * pow(0.01f, (float)steps / total_iterations);
 		// Pick a random image for training
 		int imgIdx = rand() % images.size();
 		const Image &img = images[imgIdx];
-		setCameraFromColmap(img);
+
+		// Find corresponding camera for intrinsics
+		const Camera *pCam = nullptr;
+		for (const auto &c : cameras) {
+			if (c.id == img.camera_id) {
+				pCam = &c;
+				break;
+			}
+		}
+		setCameraFromColmap(img, pCam);
 
 		// Load ground truth image if not in cache
 		if (gtImageCache[imgIdx].empty()) {
@@ -1021,7 +1048,8 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 							0, 1, &postArgpassBarrier, 0, nullptr, 0, nullptr);
 
 		vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-		vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(KVCapacity), &KVCapacity);
+		ProjPush projPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
+		vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ProjPush), &projPush);
 		VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[frameIdx]};
 		vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
 								projComputePipelineLayout, 0, 2, bindDescriptorSets,
@@ -1044,6 +1072,16 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t),
 							&KVCapacity);
 		vkCmdDispatch(cmdbuf, 1, 1, 1);
+
+		// Visibility Barrier: Ensure Pass A writes are visible to Pass B
+		VkMemoryBarrier passAFinalBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+		passAFinalBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		passAFinalBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+		vkCmdPipelineBarrier(cmdbuf,
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+							VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+							0, 1, &passAFinalBarrier, 0, nullptr, 0, nullptr);
+
 		vkEndCommandBuffer(cmdbuf);
 
 		VkSubmitInfo submitInfoA{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1060,8 +1098,8 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 									VK_NULL_HANDLE, 0);
 
 		VkMemoryBarrier postSortBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-		postSortBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-		postSortBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+		postSortBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+		postSortBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
 		vkCmdPipelineBarrier(cmdbuf2,
 							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
@@ -1079,9 +1117,9 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 		VkImageMemoryBarrier imageToGeneralBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 		imageToGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		imageToGeneralBarrier.image = offscreenImages[frameIdx];
-		imageToGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageToGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
 		imageToGeneralBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-		imageToGeneralBarrier.srcAccessMask = VK_ACCESS_NONE;
+		imageToGeneralBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 		imageToGeneralBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 		imageToGeneralBarrier.subresourceRange = subresourceRange;
 
@@ -1091,12 +1129,12 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 		std::array<VkImageMemoryBarrier, 2> imageBarriers = {imageToGeneralBarrier, contribToGeneralBarrier};
 
 		VkMemoryBarrier postRangeBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-		postRangeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		postRangeBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+		postRangeBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+		postRangeBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 		vkCmdPipelineBarrier(cmdbuf2,
 							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-							0, 1, &postRangeBarrier, 0, nullptr, imageBarriers.size(), imageBarriers.data());
+							0, 1, &postRangeBarrier, 0, nullptr, (uint32_t)imageBarriers.size(), imageBarriers.data());
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipeline);
 		// Generate random solid background color
@@ -1106,7 +1144,7 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 		float bgR = 0;
 		float bgG = 0;
 		float bgB = 0;
-		RasterPush rasterPush{KVCapacity, bgR, bgG, bgB};
+		RasterPush rasterPush{KVCapacity, bgR, bgG, bgB, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
 		vkCmdPushConstants(cmdbuf2, rasterTrainComputePipelineLayout,
 						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RasterPush),
 						&rasterPush);
@@ -1154,7 +1192,7 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 							0, 1, &postConvBarrier, 0, nullptr, 0, nullptr);
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, backwardComputePipeline);
-		BackwardPush backPush{lambda, bgR, bgG, bgB, KVCapacity};
+		BackwardPush backPush{lambda, bgR, bgG, bgB, KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
 		vkCmdPushConstants(cmdbuf2, backwardComputePipelineLayout,
 							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BackwardPush),
 							&backPush);
@@ -1185,7 +1223,7 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 		// changed!! (Use gaussianCountBuffer)
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, adamComputePipeline);
 		AdamPush adamPush{
-			lr,         // pos_lr (use passed lr as default 0.00016)
+			current_lr, // pos_lr (exponentially decayed from default 0.00016)
 			0.001f,     // rot_lr
 			0.005f,     // scale_lr
 			0.05f,      // opacity_lr
@@ -1262,10 +1300,13 @@ void Engine::train(std::vector<Image> &images, int32_t iterations,
 								VK_PIPELINE_STAGE_TRANSFER_BIT,
 								VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
 								0, 1, &preDensityControlBarrier, 0, nullptr, 0, nullptr);
+			
+			vkCmdPushConstants(cmdbuf2, markPrunePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float), &sceneExt);
 
 			vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
 									markPrunePipelineLayout, 0, 2,
 									bindTrainDescriptorSets, 0, nullptr);
+
 
 			// Current maxGaussians for pruning (not active_count as we might have added new ones)
 			vkCmdDispatch(cmdbuf2, (maxGaussians + 255) / 256, 1, 1);
@@ -1600,7 +1641,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 	VkPushConstantRange push{};
 	push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	push.offset = 0;
-	push.size = sizeof(uint32_t); // kvCapacity
+	push.size = sizeof(ProjPush); // kvCapacity, n_cols, n_rows
 	std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
 	createComputePipeline(projComputePipeline, projComputePipelineLayout,
 						"../shader/spv/projection.spv", 1, &push,
@@ -1615,7 +1656,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 	VkPushConstantRange rasterPush{};
 	rasterPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	rasterPush.offset = 0;
-	rasterPush.size = sizeof(uint32_t); // KVCapacity
+	rasterPush.size = sizeof(ProjPush); // kvCapacity, n_cols, n_rows
 	createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout,
 						"../shader/spv/raster.spv", 1, &rasterPush,
 						setLayout.size(), setLayout.data());
@@ -1698,7 +1739,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 	VkPushConstantRange push{};
 	push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	push.offset = 0;
-	push.size = sizeof(uint32_t); // kvCapacity
+	push.size = sizeof(ProjPush); // kvCapacity, n_cols, n_rows
 	std::array<VkDescriptorSetLayout, 2> setLayout = {globalDescriptorSetLayout, localDescriptorSetLayout};
 	createComputePipeline(projComputePipeline, projComputePipelineLayout,
 						"../shader/spv/projection.spv", 1, &push,
@@ -1713,7 +1754,7 @@ Engine::Engine(uint64_t src_width, uint64_t src_height, float scale, std::vector
 	VkPushConstantRange rasterPush{};
 	rasterPush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	rasterPush.offset = 0;
-	rasterPush.size = sizeof(uint32_t); // KVCapacity
+	rasterPush.size = sizeof(ProjPush); // kvCapacity, n_cols, n_rows
 	createComputePipeline(rasterComputePipeline, rasterComputePipelineLayout,
 						"../shader/spv/raster.spv", 1, &rasterPush,
 						setLayout.size(), setLayout.data());
@@ -2100,7 +2141,7 @@ void Engine::createSorterAndBuffer() {
 									.pipelineCache = VK_NULL_HANDLE};
 	vrdxCreateSorter(&sorterInfo, &sorter);
 
-	KVCapacity = maxGaussians << 6; // static pre-allocation pool (increased to fix blocks)
+	KVCapacity = maxGaussians << 8; // static pre-allocation pool (reverted from 10 to 8 to fix Apple M1 Out of Memory crash)
 
 	// VkDeviceSize keyBufferSize = totalKVCount * sizeof(uint64_t);
 	// VkDeviceSize valueBufferSize = totalKVCount * sizeof(uint32_t);
@@ -2713,18 +2754,22 @@ void Engine::updateCameraUBO(float deltaTime) {
 	float moveSpeed = 3.0f * deltaTime;
 	float rotSpeed = 60.0f * deltaTime;
 
+	// Use fixed world up for manual control to prevent rolling and slanted movement
+	const glm::vec3 worldUp = glm::vec3(0.0f, -1.0f, 0.0f);
+	glm::vec3 right = glm::normalize(glm::cross(cameraFront, worldUp));
+
 	if (glfwGetKey(pWindow, GLFW_KEY_W) == GLFW_PRESS)
 		cameraPos += moveSpeed * cameraFront;
 	if (glfwGetKey(pWindow, GLFW_KEY_S) == GLFW_PRESS)
 		cameraPos -= moveSpeed * cameraFront;
 	if (glfwGetKey(pWindow, GLFW_KEY_SPACE) == GLFW_PRESS)
-		cameraPos += moveSpeed * cameraUp;
+		cameraPos += moveSpeed * worldUp;
 	if (glfwGetKey(pWindow, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-		cameraPos -= moveSpeed * cameraUp;
+		cameraPos -= moveSpeed * worldUp;
 	if (glfwGetKey(pWindow, GLFW_KEY_A) == GLFW_PRESS)
-		cameraPos -= glm::normalize(glm::cross(cameraFront, cameraUp)) * moveSpeed;
+		cameraPos -= right * moveSpeed;
 	if (glfwGetKey(pWindow, GLFW_KEY_D) == GLFW_PRESS)
-		cameraPos += glm::normalize(glm::cross(cameraFront, cameraUp)) * moveSpeed;
+		cameraPos += right * moveSpeed;
 
 	if (glfwGetKey(pWindow, GLFW_KEY_UP) == GLFW_PRESS)
 		pitch -= rotSpeed;
@@ -2735,8 +2780,10 @@ void Engine::updateCameraUBO(float deltaTime) {
 	if (glfwGetKey(pWindow, GLFW_KEY_RIGHT) == GLFW_PRESS)
 		yaw -= rotSpeed;
 
+	// Normalize angles
 	if (pitch > 89.0f) pitch = 89.0f;
 	if (pitch < -89.0f) pitch = -89.0f;
+	yaw = fmod(yaw, 360.0f);
 
 	glm::vec3 front;
 	front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
@@ -2744,11 +2791,11 @@ void Engine::updateCameraUBO(float deltaTime) {
 	front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
 	cameraFront = glm::normalize(front);
 
-	updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
+	updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, worldUp);
 	memcpy(cameraBufferMapped[currentFrame], &camUBO, sizeof(CameraUBO));
 }
 
-void Engine::setCameraFromColmap(const Image &image) {
+void Engine::setCameraFromColmap(const Image &image, const Camera *camera) {
 	glm::quat q = image.q;
 	glm::mat3 R_cw = glm::mat3_cast(q);
 	glm::vec3 t_cw = image.t;
@@ -2768,8 +2815,17 @@ void Engine::setCameraFromColmap(const Image &image) {
 	pitch = glm::degrees(asin(cameraFront.y));
 	yaw = glm::degrees(atan2(cameraFront.z, cameraFront.x));
 
+	// Intrinsics (Focal length)
+	float fx = -1.0f, fy = -1.0f;
+	if (camera) {
+		float scaleX = (float)render_width / (float)camera->width;
+		float scaleY = (float)render_height / (float)camera->height;
+		fx = (float)camera->params[0] * scaleX;
+		fy = (camera->model == 0) ? fx : (float)camera->params[1] * scaleY;
+	}
+
 	// Force update immediately
-	updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
+	updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp, fx, fy);
 	for (int i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
 		memcpy(cameraBufferMapped[i], &camUBO, sizeof(CameraUBO));
 	}

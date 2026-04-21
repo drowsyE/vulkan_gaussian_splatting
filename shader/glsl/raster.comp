@@ -47,6 +47,8 @@ layout(set = 1, binding = 1, rgba8) uniform writeonly image2D outImage;
 
 layout(push_constant) uniform PushConstant {
     uint kvCapacity;
+    uint n_cols;
+    uint n_rows;
 } push;
 
 const uint BLOCK_SIZE = 256;
@@ -62,9 +64,7 @@ void main() {
     
     bool inside = (pixelCoord.x < size.x && pixelCoord.y < size.y);
 
-    uint n_cols = (size.x + 15u) >> 4u;
-    uint n_rows = (size.y + 15u) >> 4u;
-    uint tileIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * n_cols;
+    uint tileIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * push.n_cols;
 
     vec3 C = vec3(0.0);
     float T = 1.0;
@@ -72,7 +72,7 @@ void main() {
     // Get tile range
     uint start = 0;
     uint end = 0;
-    if (tileIdx < n_cols * n_rows) {
+    if (tileIdx < push.n_cols * push.n_rows) {
         start = ranges[tileIdx].start;
         end = ranges[tileIdx].end;
     }

@@ -81,6 +81,8 @@ layout(push_constant) uniform PushConstants {
     float bgG;
     float bgB;
     uint kvCapacity;
+    uint n_cols;
+    uint n_rows;
 } p;
 
 
@@ -108,9 +110,7 @@ void main() {
     bool inside = (curr.x < size.x && curr.y < size.y);
     if (!inside) return;
 
-    uint n_cols = (size.x + 15u) >> 4u;
-    uint n_rows = (size.y + 15u) >> 4u;
-    uint tileIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * n_cols;
+    uint tileIdx = gl_WorkGroupID.x + gl_WorkGroupID.y * p.n_cols;
 
     // -- start of dL/dC ---
     const float C1 = 0.0001f;
@@ -161,7 +161,7 @@ void main() {
     // Get tile range
     uint start = 0;
     uint end = 0;
-    if (tileIdx < n_cols * n_rows) {
+    if (tileIdx < p.n_cols * p.n_rows) {
         start = ranges[tileIdx].start;
         end = imageLoad(outContribution, curr).x;
     }
@@ -183,27 +183,31 @@ void main() {
         vec2 d = vec2(curr) - g.pos2d;
 
         float power = -0.5 * (g.conics.x * d.x * d.x + 2.0 * g.conics.y * d.x * d.y + g.conics.z * d.y * d.y);
+        if (power > 0.0) continue; // Must match forward rasterizer's guard
         float G = exp(power);
         float alpha = min(0.99, g.opacity * G);
         if (alpha < 1.0/255.0) continue; 
 
-        T_last /= max(0.01, 1.0 - alpha);
+        // Numerical stability: Clamp alpha to avoid division by zero/near-zero
+        float alpha_safe = clamp(alpha, 0.0, 0.99);
+        T_last /= max(0.0001, 1.0 - alpha_safe);
         float T_i = T_last;
 
         // --- 1. dL/dalpha_prime (Effective Alpha에 대한 미분) ---
         // 유도한 수식: T_i * c_i - (1/(1-alpha)) * K
-        vec3 dC_da_v = T_i * g.color - accum_Tac / (1.0 - alpha + 1e-7);
+        vec3 dC_da_v = T_i * g.color - accum_Tac / max(0.0001, 1.0 - alpha_safe);
         float dL_da = dot(dL_dC, dC_da_v);
 
         // --- 2. dL/dc (Color에 대한 미분) ---
         vec3 dL_dc = dL_dC * (T_i * alpha);
+        
+        // Robustness: Skip if NaN or Inf detected in basic components
+        if (isnan(dL_da) || isinf(dL_da) || any(isnan(dL_dc)) || any(isinf(dL_dc))) continue;
 
         // alpha_prime = sigmoid(opacity) * G 이므로 d_alpha/d_opacity = sigmoid(op)*(1-sigmoid(op)) * G
         float dL_do = dL_da * G * g.opacity * (1.0 - g.opacity);
 
         // --- 4. dL/dpos2d (2D 중심점에 대한 미분) ---
-        // d_alpha/d_G = opacity, d_G/d_power = G, d_power/d_pos2d = M * d
-        // 여기서 M은 conics 매트릭스 [x, y; y, z]
         float dL_dG = dL_da * g.opacity;
         float dL_dpower = dL_dG * G;
         mat2 conicMat = mat2(
@@ -215,13 +219,14 @@ void main() {
         vec2 dL_dpos2d = dL_dpower * dpower_dpos2d;
 
         // --- 5. dL/dconic (Conic 파라미터 x, y, z에 대한 미분) ---
-        // power = -0.5 * (x*dx^2 + 2*y*dx*dy + z*dy^2)
         vec3 dL_dconic = dL_dpower * vec3(
             -0.5 * d.x * d.x,
             -1.0 * d.x * d.y,
             -0.5 * d.y * d.y
         );
 
+        // Robustness
+        if (any(isnan(dL_dpos2d)) || any(isinf(dL_dpos2d)) || any(isnan(dL_dconic)) || any(isinf(dL_dconic))) continue;
 
         // --- 6. dL/dpos3d ---
         vec4 t_homo = cb.view * vec4(gauss.mean, 1.0);
@@ -229,24 +234,33 @@ void main() {
 
         float f_x = cb.focalX;
         float f_y = cb.focalY;
-        float tz = -t.z; // 양수 깊이 값 (오른손 좌표계 보정)
+        float tz = -t.z; 
+        if (tz < 0.1) continue; // Skip if too close to camera to avoid explosion
         float tz2 = tz * tz;
 
         mat3x2 J = mat3x2(
             f_x / tz, 0.0, 
             0.0, -f_y / tz, 
-            -(f_x * t.x) / tz2, (f_y * t.y) / tz2
+            (f_x * t.x) / tz2, -(f_y * t.y) / tz2
         );
         
-        vec3 dL_dpos3d = dL_dpos2d * J;
+        mat3 viewRot = mat3(cb.view);
+        vec3 dL_dpos3d = (dL_dpos2d * J) * viewRot;
 
         // --- 7. dL/ds \ dL/dq ---
 
         // 7-1 : conic -> 3D covariance
         mat2x2 ddT = outerProduct(d, d);
-        mat2x2 dG_dSigma2d = 0.5f * G * conicMat * ddT * conicMat;
+
+        mat2 dG_dSigma2d = 0.5f * G * conicMat * ddT * conicMat; 
+        mat2 dL_dSigma2d = dL_dG * dG_dSigma2d;
+
+        if (any(isnan(dL_dSigma2d[0])) || any(isnan(dL_dSigma2d[1])) || any(isinf(dL_dSigma2d[0])) || any(isinf(dL_dSigma2d[1]))) continue;
+
+
         mat3x3 W = mat3x3(cb.view);
-        mat3x3 dL_dSigma3d = transpose(W) * transpose(J) * dL_dG * dG_dSigma2d * J * W; // dL/dSigma2d = J^T W^T dL/dSigma2d W J
+        mat3x3 dL_dSigma3d = transpose(W) * transpose(J) * dL_dSigma2d * J * W;
+
 
         // 7-2 : 3D covariance -> scale & quaternion
         vec3 s_raw = gauss.scaleOpacity.xyz;
@@ -281,20 +295,23 @@ void main() {
         float y = q.y;
         float z = q.z;
 
-        float dL_dr  = 2.0 * z * (U[0][1] - U[1][0]) + 2.0 * y * (U[2][0] - U[0][2]) + 2.0 * x * (U[1][2] - U[2][1]);
-        float dL_dqx = 2.0 * y * (U[1][0] + U[0][1]) + 2.0 * z * (U[2][0] + U[0][2]) + 2.0 * w * (U[1][2] - U[2][1]) - 4.0 * x * (U[1][1] + U[2][2]);
-        float dL_dqy = 2.0 * x * (U[1][0] + U[0][1]) + 2.0 * w * (U[2][0] - U[0][2]) + 2.0 * z * (U[2][1] + U[1][2]) - 4.0 * y * (U[0][0] + U[2][2]);
-        float dL_dqz = 2.0 * w * (U[0][1] - U[1][0]) + 2.0 * x * (U[2][0] + U[0][2]) + 2.0 * y * (U[2][1] + U[1][2]) - 4.0 * z * (U[0][0] + U[1][1]);
+        float dL_dr  = 2.0 * z * (U[1][0] - U[0][1]) + 2.0 * y * (U[0][2] - U[2][0]) + 2.0 * x * (U[2][1] - U[1][2]);
+        float dL_dqx = 2.0 * y * (U[1][0] + U[0][1]) + 2.0 * z * (U[2][0] + U[0][2]) + 2.0 * w * (U[2][1] - U[1][2]) - 4.0 * x * (U[1][1] + U[2][2]);
+        float dL_dqy = 2.0 * x * (U[1][0] + U[0][1]) + 2.0 * z * (U[2][1] + U[1][2]) + 2.0 * w * (U[0][2] - U[2][0]) - 4.0 * y * (U[0][0] + U[2][2]);
+        float dL_dqz = 2.0 * x * (U[2][0] + U[0][2]) + 2.0 * y * (U[1][2] + U[2][1]) + 2.0 * w * (U[1][0] - U[0][1]) - 4.0 * z * (U[0][0] + U[1][1]);
 
         vec4 dL_dq = vec4(dL_dqx, dL_dqy, dL_dqz, dL_dr);
+        if (any(isnan(dL_dq))) dL_dq = vec4(0.0);
 
         
         // --- [업데이트] 다음(앞쪽) 가우시안을 위해 K(accum_Tac) 갱신 ---
         accum_Tac += T_i * alpha * g.color;
         
         // --- [최종] 이제 각 가우시안의 global index에 dL들을 atomicAdd ---
-        atomicAddFloat(gradPos2d[gIdx * 2], dL_dpos2d.x);
-        atomicAddFloat(gradPos2d[gIdx * 2 + 1], dL_dpos2d.y);
+        // Accumulate gradient NORM (not vector) to match original 3DGS.
+        // Vector accumulation causes directional cancellation, destroying the
+        // split signal when pixels on opposite sides of a Gaussian disagree.
+        atomicAddFloat(gradPos2d[gIdx * 2], length(dL_dpos2d));
         atomicAdd(contributionCount[gIdx], 1);
 
         atomicAddFloat(gradGaussians[gIdx].opacity, dL_do);
@@ -315,5 +332,6 @@ void main() {
         atomicAddFloat(gradGaussians[gIdx].color[0], dL_dc.r);
         atomicAddFloat(gradGaussians[gIdx].color[1], dL_dc.g);
         atomicAddFloat(gradGaussians[gIdx].color[2], dL_dc.b);
+        atomicAdd(gradGaussians[gIdx].pad2, 1);
     }
 }

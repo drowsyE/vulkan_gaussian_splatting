@@ -15,10 +15,14 @@ layout(set = 0, binding = 0)  buffer readonly Gaussians { Gaussian gaussians[]; 
 layout(set = 1, binding = 11) buffer writeonly FlagBuffer { uint flags[]; };
 layout(set = 1, binding = 12) buffer readonly ActiveGaussianCounter { uint active_count; };
 
+layout(push_constant) uniform PushConstants {
+    float sceneExtent;
+} p;
 
 float sigmoid(float x) {
     return 1.0 / (1.0 + exp(-x));
 }
+
 
 void main() {
     uint id = gl_GlobalInvocationID.x;
@@ -28,9 +32,16 @@ void main() {
     }
 
     float opacity_raw = gaussians[id].scaleOpacity.a;
-    if (sigmoid(opacity_raw) > 0.05) {
-        flags[id] = 1;
-    } else {
+    vec3 scale_raw = gaussians[id].scaleOpacity.xyz;
+    float max_scale = exp(max(scale_raw.x, max(scale_raw.y, scale_raw.z)));
+
+    bool low_opacity = sigmoid(opacity_raw) < 0.05;
+    bool too_large = max_scale > p.sceneExtent * 0.1;
+
+    if (low_opacity || too_large) {
         flags[id] = 0;
+    } else {
+        flags[id] = 1;
     }
+
 }

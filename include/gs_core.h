@@ -53,19 +53,29 @@ typedef struct TileRange {
     uint32_t end;
 } TileRange;
 
+typedef struct ProjPush {
+	uint32_t capacity;
+	uint32_t n_cols;
+	uint32_t n_rows;
+} ProjPush;
+
 typedef struct RasterPush {
-    uint32_t capacity;
-    float bgR;
-    float bgG;
-    float bgB;
+	uint32_t capacity;
+	float bgR;
+	float bgG;
+	float bgB;
+	uint32_t n_cols;
+	uint32_t n_rows;
 } RasterPush;
 
 typedef struct BackwardPush {
-    float lambda;
-    float bgR;
-    float bgG;
-    float bgB;
-    uint32_t kvCapacity;
+	float lambda;
+	float bgR;
+	float bgG;
+	float bgB;
+	uint32_t kvCapacity;
+	uint32_t n_cols;
+	uint32_t n_rows;
 } BackwardPush;
 
 typedef struct DensityControlPush {

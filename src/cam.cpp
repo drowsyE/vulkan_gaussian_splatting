@@ -3,13 +3,23 @@
 
 namespace Core {
 
-void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float width, float height, glm::vec3 up) {
+void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float width, float height, glm::vec3 up, float fx, float fy) {
     // 1. View Matrix (카메라 위치와 방향)
     ubo.view = glm::lookAt(position, lookAt, up);
 
     // 2. Projection Matrix (원근감)
     // 3DGS 논문 기준으로는 fovX, fovY를 통해 계산된 투영 행렬을 사용합니다.
-    float fovY = glm::radians(45.0f);
+    float fovY;
+    if (fx > 0 && fy > 0) {
+        ubo.focalX = fx;
+        ubo.focalY = fy;
+        fovY = 2.0f * atan(height / (2.0f * fy));
+    } else {
+        fovY = glm::radians(45.0f);
+        ubo.focalY = height / (2.0f * tan(fovY * 0.5f));
+        ubo.focalX = ubo.focalY;
+    }
+
     ubo.proj = glm::perspective(fovY, width / height, 0.1f, 10000.0f);
     
     // Vulkan은 OpenGL과 달리 Y축이 반대이므로 보정 (필요 시)
@@ -21,10 +31,6 @@ void updateCamera(CameraUBO& ubo, glm::vec3 position, glm::vec3 lookAt, float wi
     // 4. 기타 정보
     ubo.camPos = glm::vec4(position, 1.0f);
     ubo.viewportSize = glm::vec2(width, height);
-    
-    // 초점 거리(Focal Length) 계산 (3DGS 투영 시 필수)
-    ubo.focalY = height / (2.0f * tan(fovY * 0.5f));
-    ubo.focalX = ubo.focalY; // 보통은 동일하게 설정
 }
 
 }

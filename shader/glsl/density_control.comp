@@ -23,7 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint step;
 } p;
 
-const float pos2d_threshold = 0.005; // Increased for pixel-space gradients
+const float pos2d_threshold = 0.0002; // Match original 3DGS threshold for per-pixel averaged gradient norms
 
 // [0, 1] 범위의 Uniform 난수를 생성하는 함수, for box-muller transform
 float uintToFloat(uint x) {
@@ -54,9 +54,9 @@ vec3 sampleNormal3D(uint seed) {
 }
 
 vec3 rotate_vector(vec4 q, vec3 v) {
-    // q = [w, x, y, z]
-    float w = q.x;      
-    vec3 val = q.yzw;
+    // q = [x, y, z, w]
+    float w = q.w;      
+    vec3 val = q.xyz;
 
     vec3 t = 2.0 * cross(val, v);
     return v + w * t + cross(val, t);
@@ -71,10 +71,9 @@ void main() {
     if (p.step % 3000 == 0) { gaussians[id].scaleOpacity.a = -2.0; } // logit(0.12) \approx -2.0
 
     Gaussian g = gaussians[id];
-    vec2 g2d = vec2(gradPos2d[2*id], gradPos2d[2*id+1]);
-    float gradNorm = length(g2d) / max(1.0, float(contributionCount[id]));
+    float gradNorm = gradPos2d[2*id] / max(1.0, float(contributionCount[id]));
 
-    float scale_threshold = p.sceneExt * 0.1;
+    float scale_threshold = p.sceneExt * 0.01;
 
     if (gradNorm > pos2d_threshold) {
         float max_s = max(g.scaleOpacity.x, max(g.scaleOpacity.y, g.scaleOpacity.z));
@@ -83,7 +82,10 @@ void main() {
         Gaussian new_gaussian = g;
         if (s < scale_threshold) {
             // CLONE
-            // No additional movement for cloning based on screen-space gradients
+            // Add small jitter to cloned gaussian to break symmetry
+            vec3 noise = sampleNormal3D(id + p.step + 1234u);
+            vec3 world_offset = rotate_vector(g.rot, noise * exp(g.scaleOpacity.xyz) * 0.05); // 5% jitter
+            new_gaussian.mean += world_offset;
         } else {
             // SPLIT
             float log16 = log(1.6);
