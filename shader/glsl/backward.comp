@@ -367,7 +367,6 @@ void main() {
                 // Subgroup Reduction
                 float sum_dL_dpos2d_x = subgroupAdd(dL_dpos2d.x);
                 float sum_dL_dpos2d_y = subgroupAdd(dL_dpos2d.y);
-                uint sum_contrib         = subgroupAdd(1);
                 float sum_dL_do          = subgroupAdd(dL_do);
                 
                 vec3 sum_dL_dpos3d = vec3(subgroupAdd(dL_dpos3d.x), subgroupAdd(dL_dpos3d.y), subgroupAdd(dL_dpos3d.z));
@@ -378,7 +377,6 @@ void main() {
                 if (subgroupElect()) {
                     atomicAddFloat(gradPos2d[gIdx * 2], sum_dL_dpos2d_x);
                     atomicAddFloat(gradPos2d[gIdx * 2 + 1], sum_dL_dpos2d_y);
-                    atomicAdd(contributionCount[gIdx], sum_contrib);
 
                     atomicAddFloat(gradGaussians[gIdx].opacity, sum_dL_do);
 
@@ -398,7 +396,6 @@ void main() {
                     atomicAddFloat(gradGaussians[gIdx].color[0], sum_dL_dc.r);
                     atomicAddFloat(gradGaussians[gIdx].color[1], sum_dL_dc.g);
                     atomicAddFloat(gradGaussians[gIdx].color[2], sum_dL_dc.b);
-                    atomicAdd(gradGaussians[gIdx].pad2, sum_contrib);
                 }
             }
         }

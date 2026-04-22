@@ -24,7 +24,22 @@ struct AdamState {
 layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; };
 layout(set = 0, binding = 7) buffer readonly GaussianCounter { uint numGaussians; };
 layout(set = 1, binding = 8) buffer Gradients { Gaussian grads[]; };
+layout(set = 1, binding = 9) buffer GradPos2dBlock { float gradPos2d[]; };
 layout(set = 1, binding = 10) buffer AdamMoms { AdamState moms[]; }; // m, v 저장
+layout(set = 1, binding = 14) buffer AccumNormBlock { uint accumNorm[]; };
+
+// spinlock style atomic add
+#define atomicAddFloat(mem, data) \
+{ \
+    uint oldVal = mem; \
+    uint assumed; \
+    do { \
+        assumed = oldVal; \
+        float newVal = uintBitsToFloat(assumed) + (data); \
+        oldVal = atomicCompSwap(mem, assumed, floatBitsToUint(newVal)); \
+    } while (assumed != oldVal); \
+}
+
 
 layout(push_constant) uniform PushConstant {
     // Adam params
@@ -154,4 +169,9 @@ void main() {
     grads[gIdx].rot = vec4(0.0);
     grads[gIdx].color = vec3(0.0);
     grads[gIdx].gradCount = 0u;
+
+    // 8. Calculate and accumulate norm of 2D gradient for density control
+    vec2 pos2dGrad = vec2(gradPos2d[gIdx * 2], gradPos2d[gIdx * 2 + 1]);
+    float stepNorm = length(pos2dGrad);
+    atomicAddFloat(accumNorm[gIdx], stepNorm);
 }

@@ -74,9 +74,8 @@ void main() {
     if (p.step % 3000 == 0) { gaussians[id].scaleOpacity.a = -4.605; } // logit(0.01) \approx -4.605
 
     Gaussian g = gaussians[id];
-    // Compute the magnitude of the accumulated gradient vector and average over 100 steps
-    vec2 totalGrad = vec2(gradPos2d[2*id], gradPos2d[2*id + 1]);
-    float gradNorm = length(totalGrad) / 100.0;
+    // Retrieve the accumulated length of per-step gradients over 100 steps and average
+    float gradNorm = uintBitsToFloat(contributionCount[id]) / 100.0;
 
     float scale_threshold = p.sceneExt * 0.01;
 

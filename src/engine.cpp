@@ -1012,6 +1012,7 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 							0, 0, nullptr, 0, nullptr, 1, &barrier);
 
 		vkCmdFillBuffer(cmdbuf, gaussianGradBuffer, 0, VK_WHOLE_SIZE, 0);
+		vkCmdFillBuffer(cmdbuf, gradPos2dBuffer, 0, VK_WHOLE_SIZE, 0);
 		vkCmdFillBuffer(cmdbuf, counterBuffer, 0, VK_WHOLE_SIZE, 0);
 		vkCmdFillBuffer(cmdbuf, tileRangeBuffer, 0, VK_WHOLE_SIZE, 0);
 		vkCmdFillBuffer(cmdbuf, projectedGaussianBuffer, 0, VK_WHOLE_SIZE, 0);
@@ -1141,12 +1142,9 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipeline);
 		// Generate random solid background color
-		// float bgR = static_cast<float>(rand()) / RAND_MAX;
-		// float bgG = static_cast<float>(rand()) / RAND_MAX;
-		// float bgB = static_cast<float>(rand()) / RAND_MAX;
-		float bgR = 0;
-		float bgG = 0;
-		float bgB = 0;
+		float bgR = static_cast<float>(rand()) / RAND_MAX;
+		float bgG = static_cast<float>(rand()) / RAND_MAX;
+		float bgB = static_cast<float>(rand()) / RAND_MAX;
 		RasterPush rasterPush{KVCapacity, bgR, bgG, bgB, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
 		vkCmdPushConstants(cmdbuf2, rasterTrainComputePipelineLayout,
 						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RasterPush),
@@ -1246,7 +1244,6 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 
 		// Every 100 steps, after densification, or at the start, clear accumulation
 		if (steps % 100 == 1) {
-			vkCmdFillBuffer(cmdbuf2, gradPos2dBuffer, 0, VK_WHOLE_SIZE, 0);
 			vkCmdFillBuffer(cmdbuf2, contributionCountBuffer, 0, VK_WHOLE_SIZE, 0);
 		}
 
