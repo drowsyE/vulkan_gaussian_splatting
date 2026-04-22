@@ -63,6 +63,7 @@ const uint BLOCK_SIZE = 256;
 
 shared uint shared_indices[BLOCK_SIZE];
 shared Gaussian2D shared_gaussians[BLOCK_SIZE];
+shared uint all_opaque;
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
@@ -97,6 +98,17 @@ void main() {
 
     // Iterate through gaussians in chunks to use shared memory
     for (uint i = start_tile; i < end_tile; i += BLOCK_SIZE) {
+        // Tile-level early exit: if all pixels in the 16x16 tile are fully opaque, skip all remaining chunks!
+        if (localId == 0) all_opaque = 1;
+        barrier();
+
+        if (inside && T >= 0.0001) {
+            atomicAnd(all_opaque, 0); // If ANY pixel still needs processing, set flag to 0
+        }
+        barrier();
+
+        if (all_opaque == 1) break; // Entire tile is fully opaque! Stop loading Gaussians!
+
         // 1. Cooperative Load into shared memory
         uint globalIdx = i + localId;
         if (globalIdx < end_tile) {

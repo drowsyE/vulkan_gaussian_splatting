@@ -23,7 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint step;
 } p;
 
-const float pos2d_threshold = 0.0002; // Match original 3DGS threshold for per-pixel averaged gradient norms
+const float pos2d_threshold = 0.0002; // Use original 3DGS default threshold
 
 // [0, 1] 범위의 Uniform 난수를 생성하는 함수, for box-muller transform
 float uintToFloat(uint x) {
@@ -63,15 +63,20 @@ vec3 rotate_vector(vec4 q, vec3 v) {
 }
 
 void main() {
-    if (p.step % 100 != 0) return;
+    if (p.step < 500 || p.step % 100 != 0) return;
+
+    // Population cap: stop densifying when close to buffer limit
+    if (count >= uint(float(p.maxGaussians) * 0.8)) return;
 
     uint id = gl_GlobalInvocationID.x;
     if (id >= active_count) return;
 
-    if (p.step % 3000 == 0) { gaussians[id].scaleOpacity.a = -2.0; } // logit(0.12) \approx -2.0
+    if (p.step % 3000 == 0) { gaussians[id].scaleOpacity.a = -4.605; } // logit(0.01) \approx -4.605
 
     Gaussian g = gaussians[id];
-    float gradNorm = gradPos2d[2*id] / max(1.0, float(contributionCount[id]));
+    // Compute the magnitude of the accumulated gradient vector and average over 100 steps
+    vec2 totalGrad = vec2(gradPos2d[2*id], gradPos2d[2*id + 1]);
+    float gradNorm = length(totalGrad) / 100.0;
 
     float scale_threshold = p.sceneExt * 0.01;
 

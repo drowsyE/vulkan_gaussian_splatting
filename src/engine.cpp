@@ -922,7 +922,10 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	int frameIdx = 0; // Use symmetric 1-frame rendering for training instead of
 	// MAX_FRAME_IN_FLIGHT to prevent data races
 	while (iterations--) {
-		printf("Steps : %d\n", ++steps);
+		++steps;
+		if (steps % 100 == 0) {
+			printf("Steps : %d\n", steps);
+		}
 
 		VkCommandBuffer cmdbuf = computeCommandBuffers[frameIdx];
 		VkCommandBuffer cmdbuf2 = computeCommandBuffers2[frameIdx];
@@ -935,7 +938,7 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 		vkResetCommandBuffer(cmdbuf2, 0);
 
 		// --- Resource Updates (Move after Fence Wait to avoid Data Race) ---
-		float current_lr = lr * pow(0.01f, (float)steps / total_iterations);
+		float current_lr = lr * pow(0.01f, (float)steps / 30000.0f);
 		// Pick a random image for training
 		int imgIdx = rand() % images.size();
 		const Image &img = images[imgIdx];

@@ -35,7 +35,7 @@ void main() {
     vec3 scale_raw = gaussians[id].scaleOpacity.xyz;
     float max_scale = exp(max(scale_raw.x, max(scale_raw.y, scale_raw.z)));
 
-    bool low_opacity = sigmoid(opacity_raw) < 0.05;
+    bool low_opacity = sigmoid(opacity_raw) < 0.005;
     bool too_large = max_scale > p.sceneExtent * 0.1;
 
     if (low_opacity || too_large) {
