@@ -4,58 +4,54 @@ struct Gaussian {
     vec3 mean;        
     float pad1;
     vec4 scaleOpacity; 
-    vec4 rot;          // quaternion
-    vec3 color;        
-    uint gradCount;   // Packed per-iteration contribution count
+    vec4 rot;          
+    float sh[48];      
+    vec4 pad2;
 };
 
-// Adam의 상태를 저장하는 버퍼 (가우시안 개수만큼 할당)
 struct AdamState {
-    vec4 posR_m; // pos + color.R
-    vec4 posR_v;
-    vec4 scaleOpacity_m; // scale + opacity
+    vec3 pos_m;
+    float pad1;
+    vec3 pos_v;
+    float pad2;
+    vec4 scaleOpacity_m;
     vec4 scaleOpacity_v;
     vec4 rot_m;
     vec4 rot_v;
-    vec2 colorGB_m;
-    vec2 colorGB_v;
+    float sh_m[48];
+    float sh_v[48];
+    vec4 pad3[2]; // Padding to exactly 512 bytes
 };
 
 layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; };
 layout(set = 0, binding = 7) buffer readonly GaussianCounter { uint numGaussians; };
 layout(set = 1, binding = 8) buffer Gradients { Gaussian grads[]; };
 layout(set = 1, binding = 9) buffer GradPos2dBlock { float gradPos2d[]; };
-layout(set = 1, binding = 10) buffer AdamMoms { AdamState moms[]; }; // m, v 저장
+layout(set = 1, binding = 10) buffer AdamMoms { AdamState moms[]; }; 
 layout(set = 1, binding = 14) buffer AccumNormBlock { uint accumNorm[]; };
 
-// spinlock style atomic add
-#define atomicAddFloat(mem, data) \
-{ \
-    uint oldVal = mem; \
-    uint assumed; \
-    do { \
-        assumed = oldVal; \
-        float newVal = uintBitsToFloat(assumed) + (data); \
-        oldVal = atomicCompSwap(mem, assumed, floatBitsToUint(newVal)); \
-    } while (assumed != oldVal); \
-}
-
-
 layout(push_constant) uniform PushConstant {
-    // Adam params
     float pos_lr;       
     float rot_lr;
     float scale_lr;
     float opacity_lr;
     float color_lr;
-
-    float beta1;        // 보통 0.9
-    float beta2;        // 보통 0.999
-    float epsilon;      // 보통 1e-8
-    uint  step;         // 현재 트레이닝 스텝 (1부터 시작)
+    float beta1;        
+    float beta2;        
+    float epsilon;      
+    uint  step;         
+    uint  sh_degree;
 } p;
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+vec3 updateAdam3(vec3 g, inout vec3 m, inout vec3 v, float m_corr, float v_corr, float lr) {
+    m = p.beta1 * m + (1.0 - p.beta1) * g;
+    v = p.beta2 * v + (1.0 - p.beta2) * (g * g);
+    vec3 m_hat = m / m_corr;
+    vec3 v_hat = v / v_corr;
+    return (lr * m_hat) / (sqrt(v_hat) + p.epsilon);
+}
 
 vec4 updateAdam4(vec4 g, inout vec4 m, inout vec4 v, float m_corr, float v_corr, vec4 lr) {
     m = p.beta1 * m + (1.0 - p.beta1) * g;
@@ -65,11 +61,11 @@ vec4 updateAdam4(vec4 g, inout vec4 m, inout vec4 v, float m_corr, float v_corr,
     return (lr * m_hat) / (sqrt(v_hat) + p.epsilon);
 }
 
-vec2 updateAdam2(vec2 g, inout vec2 m, inout vec2 v, float m_corr, float v_corr, vec2 lr) {
+float updateAdam1(float g, inout float m, inout float v, float m_corr, float v_corr, float lr) {
     m = p.beta1 * m + (1.0 - p.beta1) * g;
     v = p.beta2 * v + (1.0 - p.beta2) * (g * g);
-    vec2 m_hat = m / m_corr;
-    vec2 v_hat = v / v_corr;
+    float m_hat = m / m_corr;
+    float v_hat = v / v_corr;
     return (lr * m_hat) / (sqrt(v_hat) + p.epsilon);
 }
 
@@ -79,99 +75,79 @@ void main() {
 
     Gaussian param = gaussians[gIdx];
 
-    // NaN Protection: If any parameter is NaN, reset and skip
-    if (any(isnan(param.mean)) || any(isnan(param.scaleOpacity)) || any(isnan(param.rot)) || any(isnan(param.color))) {
+    // NaN Protection: If position is NaN, reset and skip
+    if (any(isnan(param.mean))) {
         gaussians[gIdx].mean = vec3(0.0);
-        gaussians[gIdx].scaleOpacity = vec4(0.0, 0.0, 0.0, -10.0); // Transparent
+        gaussians[gIdx].scaleOpacity = vec4(0.0, 0.0, 0.0, -10.0); 
         gaussians[gIdx].rot = vec4(0.0, 0.0, 0.0, 1.0);
-        gaussians[gIdx].color = vec3(0.0);
         return;
     }
 
-    // 1. Bias correction factors
-    float m_corr = 1.0 - pow(p.beta1, float(p.step));
-    float v_corr = 1.0 - pow(p.beta2, float(p.step));
+    // 1. Bias correction factors (step must start at 1 to prevent division by zero)
+    float m_corr = 1.0 - pow(p.beta1, float(p.step + 1));
+    float v_corr = 1.0 - pow(p.beta2, float(p.step + 1));
 
-    // 2. Load gradients (use raw accumulated gradients, NOT averaged)
-    // Original 3DGS does NOT normalize by pixel count.
-    // Adam's second moment naturally handles gradient magnitude.
     Gaussian grad = grads[gIdx];
-
     AdamState mom = moms[gIdx];
 
-    // 3. Pack parameters and gradients
-    vec4 grad_posR = vec4(grad.mean, grad.color.r);
-    vec4 grad_scaleOpacity = grad.scaleOpacity;
-    vec4 grad_rot = grad.rot;
-    vec2 grad_colorGB = vec2(grad.color.g, grad.color.b);
-
-    vec4 param_posR = vec4(param.mean, param.color.r);
-    vec4 param_scaleOpacity = param.scaleOpacity;
-    vec4 param_rot = param.rot;
-    vec2 param_colorGB = vec2(param.color.g, param.color.b);
-
-    // 4. Update
-    vec4 posR_lr = vec4(vec3(p.pos_lr), p.color_lr);
-    
     // Safety check: Skip update if gradients are invalid
-    if (any(isnan(grad_posR)) || any(isinf(grad_posR)) ||
-        any(isnan(grad_scaleOpacity)) || any(isinf(grad_scaleOpacity)) ||
-        any(isnan(grad_rot)) || any(isinf(grad_rot)) ||
-        any(isnan(grad_colorGB)) || any(isinf(grad_colorGB))) {
-        // Just reset gradients and skip update
+    if (any(isnan(grad.mean))) {
         grads[gIdx].mean = vec3(0.0);
         grads[gIdx].scaleOpacity = vec4(0.0);
         grads[gIdx].rot = vec4(0.0);
-        grads[gIdx].color = vec3(0.0);
-        grads[gIdx].gradCount = 0u;
+        for(uint i=0; i<48; ++i) grads[gIdx].sh[i] = 0.0;
         return;
     }
 
-    param_posR -= updateAdam4(grad_posR, mom.posR_m, mom.posR_v, m_corr, v_corr, posR_lr);
+    param.mean -= updateAdam3(grad.mean, mom.pos_m, mom.pos_v, m_corr, v_corr, p.pos_lr);
     
-    vec4 scaleOpacity_lr = vec4(vec3(p.scale_lr), p.opacity_lr);
-    param_scaleOpacity -= updateAdam4(grad_scaleOpacity, mom.scaleOpacity_m, mom.scaleOpacity_v, m_corr, v_corr, scaleOpacity_lr);
-    
-    param_rot -= updateAdam4(grad_rot, mom.rot_m, mom.rot_v, m_corr, v_corr, vec4(p.rot_lr));
-    
-    param_colorGB -= updateAdam2(grad_colorGB, mom.colorGB_m, mom.colorGB_v, m_corr, v_corr, vec2(p.color_lr));
+    vec4 scaleOpacity_lr = vec4(p.scale_lr, p.scale_lr, p.scale_lr, p.opacity_lr);
+    param.scaleOpacity -= updateAdam4(grad.scaleOpacity, mom.scaleOpacity_m, mom.scaleOpacity_v, m_corr, v_corr, scaleOpacity_lr);
+    param.rot -= updateAdam4(grad.rot, mom.rot_m, mom.rot_v, m_corr, v_corr, vec4(p.rot_lr));
 
-    // Clamp color to [0, 1]
-    param_posR.w = clamp(param_posR.w, 0.0, 1.0);
-    param_colorGB = clamp(param_colorGB, vec2(0.0), vec2(1.0));
-    
-    // Normalize quaternion
-    float len_rot = length(param_rot);
-    if (len_rot > 0.0) {
-        param_rot /= len_rot;
-    } else {
-        param_rot = vec4(0.0, 0.0, 0.0, 1.0);
+    // Update SH dynamically based on pushed sh_degree
+    uint max_idx = min(48u, (p.sh_degree + 1) * (p.sh_degree + 1) * 3);
+    for (uint i = 0; i < max_idx; ++i) {
+        float lr = (i < 3) ? p.color_lr : (p.color_lr / 20.0);
+        param.sh[i] -= updateAdam1(grad.sh[i], mom.sh_m[i], mom.sh_v[i], m_corr, v_corr, lr);
     }
 
-    // Clamp scales to prevent explosion (log-space clamping)
-    // -10.0 to 5.0 is a typical range for log-scale
-    param_scaleOpacity.xyz = clamp(param_scaleOpacity.xyz, vec3(-15.0), vec3(5.0));
+    // Normalize quaternion
+    float len_rot = length(param.rot);
+    if (len_rot > 0.0) {
+        param.rot /= len_rot;
+    } else {
+        param.rot = vec4(0.0, 0.0, 0.0, 1.0);
+    }
 
-    // 5. Unpack and write back parameters
-    param.mean = param_posR.xyz;
-    param.scaleOpacity = param_scaleOpacity;
-    param.rot = param_rot;
-    param.color = vec3(param_posR.w, param_colorGB.x, param_colorGB.y);
-    
+    // Clamp scales to prevent explosion
+    param.scaleOpacity.xyz = clamp(param.scaleOpacity.xyz, vec3(-15.0), vec3(5.0));
+
     gaussians[gIdx] = param;
-
-    // 6. Write back moments
     moms[gIdx] = mom;
 
-    // 7. Reset gradients for next iteration
+    // Reset gradients for next iteration
     grads[gIdx].mean = vec3(0.0);
     grads[gIdx].scaleOpacity = vec4(0.0);
     grads[gIdx].rot = vec4(0.0);
-    grads[gIdx].color = vec3(0.0);
-    grads[gIdx].gradCount = 0u;
+    for (uint i = 0; i < 48; ++i) {
+        grads[gIdx].sh[i] = 0.0;
+    }
 
-    // 8. Calculate and accumulate norm of 2D gradient for density control
+    // Accumulate norm of 2D gradient for density control
     vec2 pos2dGrad = vec2(gradPos2d[gIdx * 2], gradPos2d[gIdx * 2 + 1]);
     float stepNorm = length(pos2dGrad);
-    atomicAddFloat(accumNorm[gIdx], stepNorm);
+    
+    // Equivalent to specific subgroup adds we used to do, just using atomic add here
+    uint oldVal = accumNorm[gIdx];
+    uint assumed;
+    do {
+        assumed = oldVal;
+        float newVal = uintBitsToFloat(assumed) + stepNorm;
+        oldVal = atomicCompSwap(accumNorm[gIdx], assumed, floatBitsToUint(newVal));
+    } while (assumed != oldVal);
+
+    // Reset gradPos2d for next iteration
+    gradPos2d[gIdx * 2] = 0.0;
+    gradPos2d[gIdx * 2 + 1] = 0.0;
 }

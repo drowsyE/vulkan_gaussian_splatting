@@ -7,8 +7,8 @@ struct Gaussian {
     float pad1;
     vec4 scaleOpacity; 
     vec4 rot;          
-    vec3 color;        
-    float pad2;
+    float sh[48];      
+    vec4 pad2;
 };
 
 layout(set = 0, binding = 0)  buffer readonly Gaussians { Gaussian gaussians[]; };

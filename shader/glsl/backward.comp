@@ -14,9 +14,9 @@ struct Gaussian {
     vec3 mean;        
     float pad1;
     vec4 scaleOpacity; 
-    vec4 rot;          // quatarnion
-    vec3 color;        // will be changed to SH coefficients soon
-    float pad;
+    vec4 rot;          
+    float sh[48];      
+    vec4 pad2;
 };
 
 struct Gaussian2D {
@@ -34,8 +34,8 @@ struct GaussianGrad {
     uint scale[3];
     uint opacity;
     uint rot[4];
-    uint color[3];
-    uint pad2;
+    uint sh[48];
+    vec4 pad2;
 };
 
 layout(set = 0, binding = 0) buffer readonly Gaussians { Gaussian gaussians[]; };
@@ -83,7 +83,13 @@ layout(push_constant) uniform PushConstants {
     uint kvCapacity;
     uint n_cols;
     uint n_rows;
+    uint sh_degree;
 } p;
+
+const float SH_C0 = 0.282095f;
+const float SH_C1 = 0.488603f;
+const float SH_C2[5] = float[](1.092548f, -1.092548f, 0.315392f, -1.092548f, 0.546274f);
+const float SH_C3[7] = float[](-0.590050f, 2.890611f, -0.457046f, 0.373176f, -0.457046f, 1.445306f, -0.590050f);
 
 const uint BLOCK_SIZE = 256; // = 16*16 workgroup size
 
@@ -375,8 +381,9 @@ void main() {
                 vec3 sum_dL_dc     = vec3(subgroupAdd(dL_dc.r), subgroupAdd(dL_dc.g), subgroupAdd(dL_dc.b));
 
                 if (subgroupElect()) {
-                    atomicAddFloat(gradPos2d[gIdx * 2], sum_dL_dpos2d_x);
-                    atomicAddFloat(gradPos2d[gIdx * 2 + 1], sum_dL_dpos2d_y);
+                    // Convert pixel-space gradient to NDC-space gradient for density control thresholds!
+                    atomicAddFloat(gradPos2d[gIdx * 2], sum_dL_dpos2d_x * cb.viewportSize.x * 0.5);
+                    atomicAddFloat(gradPos2d[gIdx * 2 + 1], sum_dL_dpos2d_y * cb.viewportSize.y * 0.5);
 
                     atomicAddFloat(gradGaussians[gIdx].opacity, sum_dL_do);
 
@@ -393,9 +400,127 @@ void main() {
                     atomicAddFloat(gradGaussians[gIdx].rot[2], sum_dL_dq.z);
                     atomicAddFloat(gradGaussians[gIdx].rot[3], sum_dL_dq.w);
 
-                    atomicAddFloat(gradGaussians[gIdx].color[0], sum_dL_dc.r);
-                    atomicAddFloat(gradGaussians[gIdx].color[1], sum_dL_dc.g);
-                    atomicAddFloat(gradGaussians[gIdx].color[2], sum_dL_dc.b);
+                    // Compute SH Gradients dynamically using subgroupAdd
+                    vec3 dir = gauss.mean - cb.camPos.xyz;
+                    float dir_len = length(dir);
+                    vec3 sh_dir = dir_len > 0.0 ? dir / dir_len : vec3(0.0);
+                    float x = sh_dir.x, y = sh_dir.y, z = sh_dir.z;
+                    float xx = x * x, yy = y * y, zz = z * z;
+                    float xy = x * y, xz = x * z, yz = y * z;
+
+                    uint degree = p.sh_degree;
+                    vec3 dL_dd = vec3(0.0); // derivative of loss wrt view direction
+
+                    if (degree >= 0) {
+                        atomicAddFloat(gradGaussians[gIdx].sh[0], sum_dL_dc.r * SH_C0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[1], sum_dL_dc.g * SH_C0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[2], sum_dL_dc.b * SH_C0);
+                    }
+                    if (degree >= 1) {
+                        float b1_0 = -SH_C1 * y, b1_1 = SH_C1 * z, b1_2 = -SH_C1 * x;
+                        atomicAddFloat(gradGaussians[gIdx].sh[3], sum_dL_dc.r * b1_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[4], sum_dL_dc.g * b1_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[5], sum_dL_dc.b * b1_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[6], sum_dL_dc.r * b1_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[7], sum_dL_dc.g * b1_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[8], sum_dL_dc.b * b1_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[9], sum_dL_dc.r * b1_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[10], sum_dL_dc.g * b1_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[11], sum_dL_dc.b * b1_2);
+
+                        float sum_c1_m1 = dot(sum_dL_dc, vec3(gauss.sh[3], gauss.sh[4], gauss.sh[5]));
+                        float sum_c1_0  = dot(sum_dL_dc, vec3(gauss.sh[6], gauss.sh[7], gauss.sh[8]));
+                        float sum_c1_1  = dot(sum_dL_dc, vec3(gauss.sh[9], gauss.sh[10], gauss.sh[11]));
+                        dL_dd.x -= SH_C1 * sum_c1_1;
+                        dL_dd.y -= SH_C1 * sum_c1_m1;
+                        dL_dd.z += SH_C1 * sum_c1_0;
+                    }
+                    if (degree >= 2) {
+                        float b2_0 = SH_C2[0] * xy, b2_1 = SH_C2[1] * yz;
+                        float b2_2 = SH_C2[2] * (2.0 * zz - xx - yy);
+                        float b2_3 = SH_C2[3] * xz, b2_4 = SH_C2[4] * (xx - yy);
+                        
+                        atomicAddFloat(gradGaussians[gIdx].sh[12], sum_dL_dc.r * b2_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[13], sum_dL_dc.g * b2_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[14], sum_dL_dc.b * b2_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[15], sum_dL_dc.r * b2_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[16], sum_dL_dc.g * b2_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[17], sum_dL_dc.b * b2_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[18], sum_dL_dc.r * b2_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[19], sum_dL_dc.g * b2_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[20], sum_dL_dc.b * b2_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[21], sum_dL_dc.r * b2_3);
+                        atomicAddFloat(gradGaussians[gIdx].sh[22], sum_dL_dc.g * b2_3);
+                        atomicAddFloat(gradGaussians[gIdx].sh[23], sum_dL_dc.b * b2_3);
+                        atomicAddFloat(gradGaussians[gIdx].sh[24], sum_dL_dc.r * b2_4);
+                        atomicAddFloat(gradGaussians[gIdx].sh[25], sum_dL_dc.g * b2_4);
+                        atomicAddFloat(gradGaussians[gIdx].sh[26], sum_dL_dc.b * b2_4);
+
+                        float sum_c2_m2 = dot(sum_dL_dc, vec3(gauss.sh[12], gauss.sh[13], gauss.sh[14]));
+                        float sum_c2_m1 = dot(sum_dL_dc, vec3(gauss.sh[15], gauss.sh[16], gauss.sh[17]));
+                        float sum_c2_0  = dot(sum_dL_dc, vec3(gauss.sh[18], gauss.sh[19], gauss.sh[20]));
+                        float sum_c2_1  = dot(sum_dL_dc, vec3(gauss.sh[21], gauss.sh[22], gauss.sh[23]));
+                        float sum_c2_2  = dot(sum_dL_dc, vec3(gauss.sh[24], gauss.sh[25], gauss.sh[26]));
+                        dL_dd.x += SH_C2[0] * y * sum_c2_m2 + SH_C2[2] * (-2.0 * x) * sum_c2_0 + SH_C2[3] * z * sum_c2_1 + SH_C2[4] * (2.0 * x) * sum_c2_2;
+                        dL_dd.y += SH_C2[0] * x * sum_c2_m2 + SH_C2[1] * z * sum_c2_m1 + SH_C2[2] * (-2.0 * y) * sum_c2_0 + SH_C2[4] * (-2.0 * y) * sum_c2_2;
+                        dL_dd.z += SH_C2[1] * y * sum_c2_m1 + SH_C2[2] * (4.0 * z) * sum_c2_0 + SH_C2[3] * x * sum_c2_1;
+                    }
+                    if (degree >= 3) {
+                        float b3_0 = SH_C3[0] * y * (3.0 * xx - yy);
+                        float b3_1 = SH_C3[1] * xy * z;
+                        float b3_2 = SH_C3[2] * y * (4.0 * zz - xx - yy);
+                        float b3_3 = SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+                        float b3_4 = SH_C3[4] * x * (4.0 * zz - xx - yy);
+                        float b3_5 = SH_C3[5] * z * (xx - yy);
+                        float b3_6 = SH_C3[6] * x * (xx - 3.0 * yy);
+
+                        atomicAddFloat(gradGaussians[gIdx].sh[27], sum_dL_dc.r * b3_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[28], sum_dL_dc.g * b3_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[29], sum_dL_dc.b * b3_0);
+                        atomicAddFloat(gradGaussians[gIdx].sh[30], sum_dL_dc.r * b3_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[31], sum_dL_dc.g * b3_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[32], sum_dL_dc.b * b3_1);
+                        atomicAddFloat(gradGaussians[gIdx].sh[33], sum_dL_dc.r * b3_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[34], sum_dL_dc.g * b3_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[35], sum_dL_dc.b * b3_2);
+                        atomicAddFloat(gradGaussians[gIdx].sh[36], sum_dL_dc.r * b3_3);
+                        atomicAddFloat(gradGaussians[gIdx].sh[37], sum_dL_dc.g * b3_3);
+                        atomicAddFloat(gradGaussians[gIdx].sh[38], sum_dL_dc.b * b3_3);
+                        atomicAddFloat(gradGaussians[gIdx].sh[39], sum_dL_dc.r * b3_4);
+                        atomicAddFloat(gradGaussians[gIdx].sh[40], sum_dL_dc.g * b3_4);
+                        atomicAddFloat(gradGaussians[gIdx].sh[41], sum_dL_dc.b * b3_4);
+                        atomicAddFloat(gradGaussians[gIdx].sh[42], sum_dL_dc.r * b3_5);
+                        atomicAddFloat(gradGaussians[gIdx].sh[43], sum_dL_dc.g * b3_5);
+                        atomicAddFloat(gradGaussians[gIdx].sh[44], sum_dL_dc.b * b3_5);
+                        atomicAddFloat(gradGaussians[gIdx].sh[45], sum_dL_dc.r * b3_6);
+                        atomicAddFloat(gradGaussians[gIdx].sh[46], sum_dL_dc.g * b3_6);
+                        atomicAddFloat(gradGaussians[gIdx].sh[47], sum_dL_dc.b * b3_6);
+
+                        float sum_c3_m3 = dot(sum_dL_dc, vec3(gauss.sh[27], gauss.sh[28], gauss.sh[29]));
+                        float sum_c3_m2 = dot(sum_dL_dc, vec3(gauss.sh[30], gauss.sh[31], gauss.sh[32]));
+                        float sum_c3_m1 = dot(sum_dL_dc, vec3(gauss.sh[33], gauss.sh[34], gauss.sh[35]));
+                        float sum_c3_0  = dot(sum_dL_dc, vec3(gauss.sh[36], gauss.sh[37], gauss.sh[38]));
+                        float sum_c3_1  = dot(sum_dL_dc, vec3(gauss.sh[39], gauss.sh[40], gauss.sh[41]));
+                        float sum_c3_2  = dot(sum_dL_dc, vec3(gauss.sh[42], gauss.sh[43], gauss.sh[44]));
+                        float sum_c3_3  = dot(sum_dL_dc, vec3(gauss.sh[45], gauss.sh[46], gauss.sh[47]));
+
+                        dL_dd.x += SH_C3[0] * (6.0 * x * y) * sum_c3_m3 + SH_C3[1] * y * z * sum_c3_m2 + SH_C3[2] * (-2.0 * x * y) * sum_c3_m1 +
+                                   SH_C3[3] * (-6.0 * x * z) * sum_c3_0 + SH_C3[4] * (4.0 * zz - 3.0 * xx - yy) * sum_c3_1 +
+                                   SH_C3[5] * (2.0 * x * z) * sum_c3_2 + SH_C3[6] * (3.0 * xx - 3.0 * yy) * sum_c3_3;
+                        dL_dd.y += SH_C3[0] * (3.0 * xx - 3.0 * yy) * sum_c3_m3 + SH_C3[1] * x * z * sum_c3_m2 + SH_C3[2] * (4.0 * zz - xx - 3.0 * yy) * sum_c3_m1 +
+                                   SH_C3[3] * (-6.0 * y * z) * sum_c3_0 + SH_C3[4] * (-2.0 * x * y) * sum_c3_1 +
+                                   SH_C3[5] * (-2.0 * y * z) * sum_c3_2 + SH_C3[6] * (-6.0 * x * y) * sum_c3_3;
+                        dL_dd.z += SH_C3[1] * x * y * sum_c3_m2 + SH_C3[2] * (8.0 * y * z) * sum_c3_m1 + SH_C3[3] * (6.0 * zz - 3.0 * xx - 3.0 * yy) * sum_c3_0 +
+                                   SH_C3[4] * (8.0 * x * z) * sum_c3_1 + SH_C3[5] * (xx - yy) * sum_c3_2;
+                    }
+
+                    // View-dependent direction loss backpropagated to position loss
+                    if (dir_len > 0.0) {
+                        vec3 dL_dmean_sh = (dL_dd - sh_dir * dot(dL_dd, sh_dir)) / dir_len;
+                        atomicAddFloat(gradGaussians[gIdx].mean[0], dL_dmean_sh.x);
+                        atomicAddFloat(gradGaussians[gIdx].mean[1], dL_dmean_sh.y);
+                        atomicAddFloat(gradGaussians[gIdx].mean[2], dL_dmean_sh.z);
+                    }
                 }
             }
         }

@@ -7,15 +7,32 @@ struct Gaussian {
     float pad1;
     vec4 scaleOpacity; 
     vec4 rot;          // quatarnion
-    vec3 color;        // will be changed to SH coefficients soon
-    float pad;
+    float sh[48];      
+    vec4 pad2;
 };
 
-layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; }; // must be compacted!
+struct AdamState {
+    vec3 pos_m;
+    float pad1;
+    vec3 pos_v;
+    float pad2;
+    vec4 scaleOpacity_m;
+    vec4 scaleOpacity_v;
+    vec4 rot_m;
+    vec4 rot_v;
+    float sh_m[48];
+    float sh_v[48];
+    vec4 pad3[2]; // Padding to exactly 512 bytes
+};
+
+layout(set = 0, binding = 0) buffer Gaussians { Gaussian gaussians[]; }; 
 layout(set = 0, binding = 7) buffer GaussianCounter { uint count; };
-layout(set = 1, binding = 9)  buffer GradPos2dBlock { float gradPos2d[]; }; // read uint as float
-layout(set = 1, binding = 14) buffer ContributionCountBlock { uint contributionCount[]; };
+layout(set = 1, binding = 8) buffer Gradients { Gaussian grads[]; };
+layout(set = 1, binding = 9) buffer GradPos2dBlock { float gradPos2d[]; }; 
+layout(set = 1, binding = 10) buffer AdamMoms { AdamState moms[]; }; 
 layout(set = 1, binding = 12) buffer ActiveGaussianCounter { uint active_count; };
+layout(set = 1, binding = 14) buffer AccumNormBlock { uint accumNorm[]; };
+
 
 layout(push_constant) uniform PushConstants {
     float sceneExt;
@@ -75,7 +92,7 @@ void main() {
 
     Gaussian g = gaussians[id];
     // Retrieve the accumulated length of per-step gradients over 100 steps and average
-    float gradNorm = uintBitsToFloat(contributionCount[id]) / 100.0;
+    float gradNorm = uintBitsToFloat(accumNorm[id]) / 100.0;
 
     float scale_threshold = p.sceneExt * 0.01;
 
@@ -106,6 +123,32 @@ void main() {
         uint write_idx = atomicAdd(count, 1);
         if (write_idx >= p.maxGaussians) return;
         gaussians[write_idx] = new_gaussian;
+
+        // Zero out Adam momentum state for the new point
+        moms[write_idx].pos_m = vec3(0.0);
+        moms[write_idx].pos_v = vec3(0.0);
+        moms[write_idx].scaleOpacity_m = vec4(0.0);
+        moms[write_idx].scaleOpacity_v = vec4(0.0);
+        moms[write_idx].rot_m = vec4(0.0);
+        moms[write_idx].rot_v = vec4(0.0);
+        for(int i = 0; i < 48; i++) {
+            moms[write_idx].sh_m[i] = 0.0;
+            moms[write_idx].sh_v[i] = 0.0;
+        }
+
+        // Zero out gradients
+        grads[write_idx].mean = vec3(0.0);
+        grads[write_idx].scaleOpacity = vec4(0.0);
+        grads[write_idx].rot = vec4(0.0);
+        for(int i = 0; i < 48; i++) {
+            grads[write_idx].sh[i] = 0.0;
+        }
+
+        // Initialize density metrics
+        accumNorm[write_idx] = 0u;
+        gradPos2d[write_idx * 2] = 0.0;
+        gradPos2d[write_idx * 2 + 1] = 0.0;
+        
         // end of critical section
     }
 }

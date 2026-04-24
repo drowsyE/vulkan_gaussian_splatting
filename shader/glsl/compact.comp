@@ -7,19 +7,22 @@ struct Gaussian {
     float pad1;
     vec4 scaleOpacity; 
     vec4 rot;          
-    vec3 color;        
-    float pad2;
+    float sh[48];      
+    vec4 pad2;
 };
 
 struct AdamState {
-    vec4 posR_m; 
-    vec4 posR_v;
+    vec3 pos_m;
+    float pad1;
+    vec3 pos_v;
+    float pad2;
     vec4 scaleOpacity_m;
     vec4 scaleOpacity_v;
     vec4 rot_m;
     vec4 rot_v;
-    vec2 colorGB_m;
-    vec2 colorGB_v;
+    float sh_m[48];
+    float sh_v[48];
+    vec4 pad3[2]; // Padding to exactly 512 bytes
 };
 
 layout(set = 0, binding = 0) buffer SourceGaussians { Gaussian src_gaussians[]; };

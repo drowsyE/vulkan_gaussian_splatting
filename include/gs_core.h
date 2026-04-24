@@ -35,8 +35,8 @@ typedef struct Gaussian3D {
     float pad1;          
     glm::vec4 scaleOpacity; // x, y, z, opacity
     glm::quat rot;          // quaternion [x, y, z, w]
-    glm::vec3 color;     
-    float pad2;          
+    float sh[48];           // Spherical Harmonics coefficients (16 * 3 = 48)
+    float pad2[4];          // Padding to 256 bytes tightly
 } Gaussian3D;
 
 typedef struct Gaussian2D { // Gaussians projected into screen plane
@@ -57,6 +57,7 @@ typedef struct ProjPush {
 	uint32_t capacity;
 	uint32_t n_cols;
 	uint32_t n_rows;
+    uint32_t sh_degree;
 } ProjPush;
 
 typedef struct RasterPush {
@@ -76,6 +77,7 @@ typedef struct BackwardPush {
 	uint32_t kvCapacity;
 	uint32_t n_cols;
 	uint32_t n_rows;
+    uint32_t sh_degree;
 } BackwardPush;
 
 typedef struct DensityControlPush {

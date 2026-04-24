@@ -121,7 +121,7 @@ void Engine::drawFrame() {
 
 	// gaussianCountBuffer is pre-initialized in generator
 	vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-	ProjPush projPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
+	ProjPush projPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row, 3}; // Full degree for inference
 	vkCmdPushConstants(cmdbuf, projComputePipelineLayout,
 						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ProjPush),
 						&projPush);
@@ -196,7 +196,7 @@ void Engine::drawFrame() {
 						0, 1, &postRangeBarrier, 0, nullptr, 1, &imageToGeneralBarrier);
 
 	vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterComputePipeline);
-	ProjPush rasterPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
+	ProjPush rasterPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row, 3}; // Full degree for inference
 	vkCmdPushConstants(cmdbuf2, rasterComputePipelineLayout,
 						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ProjPush),
 						&rasterPush);
@@ -1052,7 +1052,9 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 							0, 1, &postArgpassBarrier, 0, nullptr, 0, nullptr);
 
 		vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, projComputePipeline);
-		ProjPush projPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
+        
+		uint32_t active_sh_degree = std::min(3u, steps / 1000u);
+		ProjPush projPush{KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row, active_sh_degree};
 		vkCmdPushConstants(cmdbuf, projComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ProjPush), &projPush);
 		VkDescriptorSet bindDescriptorSets[] = {globalDescriptorSets, localDescriptorSets[frameIdx]};
 		vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1141,11 +1143,13 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 							0, 1, &postRangeBarrier, 0, nullptr, (uint32_t)imageBarriers.size(), imageBarriers.data());
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipeline);
-		// Generate random solid background color
-		float bgR = static_cast<float>(rand()) / RAND_MAX;
-		float bgG = static_cast<float>(rand()) / RAND_MAX;
-		float bgB = static_cast<float>(rand()) / RAND_MAX;
+		// Fixed solid background to prevent the 'shelling' floaters artifact where Gaussians 
+		// are artificially synthesized merely to block out the random noise variance.
+		float bgR = 0.0f;
+		float bgG = 0.0f;
+		float bgB = 0.0f;
 		RasterPush rasterPush{KVCapacity, bgR, bgG, bgB, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
+
 		vkCmdPushConstants(cmdbuf2, rasterTrainComputePipelineLayout,
 						VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RasterPush),
 						&rasterPush);
@@ -1193,7 +1197,8 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 							0, 1, &postConvBarrier, 0, nullptr, 0, nullptr);
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, backwardComputePipeline);
-		BackwardPush backPush{lambda, bgR, bgG, bgB, KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row};
+        active_sh_degree = std::min(3u, steps / 1000u);
+		BackwardPush backPush{lambda, bgR, bgG, bgB, KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row, active_sh_degree};
 		vkCmdPushConstants(cmdbuf2, backwardComputePipelineLayout,
 							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BackwardPush),
 							&backPush);
@@ -1232,7 +1237,8 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 			beta1, 
 			beta2, 
 			eps, 
-			steps
+			steps,
+            std::min(3u, steps / 1000u) // active_sh_degree
 		};
 		vkCmdPushConstants(cmdbuf2, adamComputePipelineLayout,
 							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AdamPush),

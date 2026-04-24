@@ -103,11 +103,18 @@ std::vector<Gaussian3D> gaussianFromPoints(std::vector<Point> &points, size_t si
         g.pos = glm::vec3(p.x, p.y, p.z);
         g.pad1 = 0.0f;
         g.scaleOpacity = glm::vec4(-3.f, -3.f, -3.f, -2.1972f); // scale is log scaled, opacity is logit scaled
-        // Default color: normalized from points (if available) or white for debug
-        g.color = glm::vec3(p.r / 255.0f, p.g / 255.0f, p.b / 255.0f);
-        // g.color = glm::vec3(1.f, 1.f, 1.f);
+        
+        // Convert RGB to Spherical Harmonics DC terms
+        float r = p.r / 255.0f;
+        float g_c = p.g / 255.0f;
+        float b = p.b / 255.0f;
+        g.sh[0] = (r - 0.5f) / 0.282095f;
+        g.sh[1] = (g_c - 0.5f) / 0.282095f;
+        g.sh[2] = (b - 0.5f) / 0.282095f;
+        for (int j = 3; j < 48; ++j) g.sh[j] = 0.0f;
+        
         g.rot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // Identity (w=1, x=y=z=0) -> memory [0,0,0,1]
-        g.pad2 = 0.0f;
+        for (int j = 0; j < 4; ++j) g.pad2[j] = 0.0f;
 
         gaussians[i] = g;
     }
