@@ -1143,8 +1143,11 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 							0, 1, &postRangeBarrier, 0, nullptr, (uint32_t)imageBarriers.size(), imageBarriers.data());
 
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, rasterTrainComputePipeline);
-		// Fixed solid background to prevent the 'shelling' floaters artifact where Gaussians 
-		// are artificially synthesized merely to block out the random noise variance.
+		// Synthetic datasets (Lego) require a White Background to compel identical geometric
+		// opacity. Against a Black background, dark structural portions trivially survive as
+		// transparent 'ghosts' without incurring loss. White forces solid boundary learning.
+		// Set training background to match the GT baked-in Background (Black)
+		// 1.0 (White) vs Black GT Forces the model to spawn infinite Black Gaussians to cover the White void.
 		float bgR = 0.0f;
 		float bgG = 0.0f;
 		float bgB = 0.0f;

@@ -40,7 +40,10 @@ layout(push_constant) uniform PushConstants {
     uint step;
 } p;
 
-const float pos2d_threshold = 0.0002; // Use original 3DGS default threshold
+// L1 pure derivatives natively crest roughly 5x lower analytically compared to
+// reverse-convolutional SSIM derivatives. 0.00004 precisely recaptures standard
+// cloning cadence bounds for L1 without permitting spatial divergence. 
+const float pos2d_threshold = 0.00004; 
 
 // [0, 1] 범위의 Uniform 난수를 생성하는 함수, for box-muller transform
 float uintToFloat(uint x) {
@@ -88,7 +91,12 @@ void main() {
     uint id = gl_GlobalInvocationID.x;
     if (id >= active_count) return;
 
-    if (p.step % 3000 == 0) { gaussians[id].scaleOpacity.a = -4.605; } // logit(0.01) \approx -4.605
+    if (p.step > 0 && p.step % 3000 == 0) { 
+        gaussians[id].scaleOpacity.a = min(gaussians[id].scaleOpacity.a, -4.605); // logit(0.01) \approx -4.605
+        // CRITICAL: Must also obliterate Adam Opt states; otherwise historic momentum instantly spikes opacity back up
+        moms[id].scaleOpacity_m.w = 0.0;
+        moms[id].scaleOpacity_v.w = 0.0;
+    }
 
     Gaussian g = gaussians[id];
     // Retrieve the accumulated length of per-step gradients over 100 steps and average

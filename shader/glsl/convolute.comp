@@ -31,7 +31,9 @@ void main() {
             float w = kernel[i + 5];
 
             vec3 color_x = imageLoad(outImage, pos).rgb;
-            vec3 color_y = imageLoad(gtImage, pos).rgb;
+            vec4 gt_raw = imageLoad(gtImage, pos);
+            // The dataset natively baked Black backgrounds during COLMAP evaluation.
+            vec3 color_y = gt_raw.rgb;
             
             // Luminance 변환 (채널별 가중 평균 0.299R + 0.587G + 0.114B를 써도 좋지만, 여기선 단순 평균)
             float x = dot(color_x, lw);

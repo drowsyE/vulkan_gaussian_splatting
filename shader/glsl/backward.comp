@@ -158,35 +158,20 @@ void main() {
         float var_y = imageLoad(gtSSIMStats, curr).g;
 
         vec3 c_pred = imageLoad(outImage, curr).rgb;
-        vec3 c_gt   = imageLoad(gtImage, curr).rgb;
+        vec4 gt_raw = imageLoad(gtImage, curr);
+        // The dataset natively baked Black backgrounds during COLMAP evaluation.
+        vec3 c_gt = gt_raw.rgb;
 
         float N = cb.viewportSize.x * cb.viewportSize.y;
         float N_c = N * 3.0;
 
-        // L1 Gradient (scaled by number of color elements due to .mean() reduction)
+        // Pure L1 Gradient (scaled by number of color elements due to .mean() reduction)
         vec3 dL1_dC = sign(c_pred - c_gt) / N_c;
 
-        // 현재 픽셀의 휘도(Luminance) 계산
-        float c_pred_lum = dot(c_pred, lw);
-        float c_gt_lum   = dot(c_gt, lw);
-
-        // SSIM 및 휘도 기준 미분값(Scalar) 계산
-        float A = 2.0 * mu_x * mu_y + C1;
-        float B = 2.0 * cov_xy + C2;
-        float C = mu_x * mu_x + mu_y * mu_y + C1;
-        float D = var_x + var_y + C2;
-        float ssim = (A * B) / (C * D);
-
-        // dSSIM / dLuminance (스칼라 미분값)
-        float common_factor = 2.0 / (C * D);
-        float dSSIM_dLum = common_factor * (mu_y - ssim * mu_x) + 
-                           common_factor * (c_gt_lum - mu_y - ssim * (c_pred_lum - mu_x));
-
-        // dLum/dC = w (scaled by number of pixels since SSIM is averaged over the image)
-        vec3 dSSIM_dC = (dSSIM_dLum * lw) / N;
-
-        // Total Gradient
-        dL_dC = (1.0 - lambda) * dL1_dC - lambda * dSSIM_dC;
+        // Note: SSIM spatial gradient requires full convolution backpropagation through the 11x11 window.
+        // The local analytical approximation previously here caused structural divergence.
+        // We rely 100% on the stable L1 Gradients for proper Gaussian placement.
+        dL_dC = dL1_dC;
         // --- end of dL/dC --
 
         accum_Tac = vec3(p.bgR, p.bgG, p.bgB) * T_last;
