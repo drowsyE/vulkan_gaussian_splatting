@@ -40,9 +40,6 @@ layout(push_constant) uniform PushConstants {
     uint step;
 } p;
 
-// L1 pure derivatives natively crest roughly 5x lower analytically compared to
-// reverse-convolutional SSIM derivatives. 0.00004 precisely recaptures standard
-// cloning cadence bounds for L1 without permitting spatial divergence. 
 const float pos2d_threshold = 0.00004; 
 
 // [0, 1] 범위의 Uniform 난수를 생성하는 함수, for box-muller transform

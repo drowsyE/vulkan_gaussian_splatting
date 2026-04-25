@@ -344,6 +344,11 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	VkDeviceMemory tempSSIMStatsMemory;
 	VkDeviceMemory tempSSIMStatsMemory2;
 
+	VkImage tempSSIMBack;
+	VkImage gradSSIMImage;
+	VkDeviceMemory tempSSIMBackMemory;
+	VkDeviceMemory gradSSIMImageMemory;
+
 	VkBuffer contributionCountBuffer;
 	VkDeviceMemory contributionCountBufferMemory;
 
@@ -451,7 +456,7 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	createImage(render_width, render_height, VK_FORMAT_R32G32B32A32_SFLOAT,
 				VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 				tempSSIMStats, tempSSIMStatsMemory);
-	createImage(render_width, render_height, VK_FORMAT_R32_SFLOAT,
+	createImage(render_width, render_height, VK_FORMAT_R32G32B32A32_SFLOAT,
 				VK_IMAGE_USAGE_STORAGE_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 				tempSSIMStats2, tempSSIMStatsMemory2);
 
@@ -467,7 +472,7 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	createImageView(VK_FORMAT_R32G32B32A32_SFLOAT, curSSIMStats, curSSIMStatsImageView);
 	createImageView(VK_FORMAT_R32G32_SFLOAT, gtSSIMStats, gtSSIMStatsImageView);
 	createImageView(VK_FORMAT_R32G32B32A32_SFLOAT, tempSSIMStats, tempSSIMStatsImageView);
-	createImageView(VK_FORMAT_R32_SFLOAT, tempSSIMStats2, tempSSIMStatsImageView2);
+	createImageView(VK_FORMAT_R32G32B32A32_SFLOAT, tempSSIMStats2, tempSSIMStatsImageView2);
 
 	transitionImageLayout(outContribution, VK_FORMAT_R32_UINT,
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -479,7 +484,7 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 	transitionImageLayout(tempSSIMStats, VK_FORMAT_R32G32B32A32_SFLOAT,
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-	transitionImageLayout(tempSSIMStats2, VK_FORMAT_R32_SFLOAT,
+	transitionImageLayout(tempSSIMStats2, VK_FORMAT_R32G32B32A32_SFLOAT,
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 	transitionImageLayout(offscreenImages[0], VK_FORMAT_R8G8B8_UNORM,
 						VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -496,95 +501,95 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	std::array<VkDescriptorSetLayoutBinding, 15> trainBindings{};
 
 	trainBindings[0] = { // camera buffer
-						.binding = 0,
-						.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 0,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[1] = { // outimage
-						.binding = 1,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[2] = { // gtImage
-						.binding = 2,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 2,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[3] = { // outContribution
-						.binding = 3,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 3,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[4] = { // cur ssim stats
-						.binding = 4,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 4,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[5] = { // gt ssim stats
-						.binding = 5,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 5,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[6] = { // temp ssim stats
-						.binding = 6,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
-	trainBindings[7] = { // temp ssim stats
-						.binding = 7,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 6,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
+	trainBindings[7] = { // temp ssim stats 2 (gradSSIMImage for backward pass)
+				.binding = 7,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[8] = { // gaussianGrad
-						.binding = 8,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 8,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[9] = { // gradPos2d
-						.binding = 9,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 9,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[10] = { // adamMoments
-						.binding = 10,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 10,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[11] = { // flag buffer
-						.binding = 11,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 11,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[12] = { // active gaussian counter buffer
-						.binding = 12,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 12,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[13] = { // scan buffer / indices
-						.binding = 13,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 13,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 	trainBindings[14] = { // contribution count buffer
-						.binding = 14,
-						.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 1,
-						.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-						.pImmutableSamplers = nullptr};
+				.binding = 14,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+				.pImmutableSamplers = nullptr};
 
 	VkDescriptorSetLayoutCreateInfo trainSetInfo{
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -602,7 +607,7 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	poolSizes[0] = {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 					.descriptorCount = 1};
 	poolSizes[1] = {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-					.descriptorCount = 7};
+					.descriptorCount = 9};
 	poolSizes[2] = {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 					.descriptorCount = 11};
 
@@ -778,6 +783,12 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	VkPipelineLayout convComputePipelineLayout;
 	createComputePipeline(convComputePipeline, convComputePipelineLayout,
 						"../shader/spv/convolute.spv", 1, &convPushRange,
+						static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
+
+	VkPipeline convBackComputePipeline;
+	VkPipelineLayout convBackComputePipelineLayout;
+	createComputePipeline(convBackComputePipeline, convBackComputePipelineLayout,
+						"../shader/spv/convolute_backward.spv", 1, &convPushRange,
 						static_cast<uint32_t>(trainSetLayouts.size()), trainSetLayouts.data());
 
 	VkPushConstantRange backPushRange = rasterPushRange;
@@ -1199,6 +1210,33 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 							0, 1, &postConvBarrier, 0, nullptr, 0, nullptr);
 
+		// --- SSIM Backward Pass (Horizontal & Vertical) ---
+		vertical = 0;
+		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, convBackComputePipeline);
+		vkCmdPushConstants(cmdbuf2, convBackComputePipelineLayout,
+							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int), &vertical);
+		vkCmdBindDescriptorSets(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE,
+								convBackComputePipelineLayout, 0, 2,
+								bindTrainDescriptorSets, 0, nullptr);
+		vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+		vkCmdPipelineBarrier(cmdbuf2, 
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+							0, 1, &midConvBarrier, 0, nullptr, 0, nullptr);
+
+		vertical = 1;
+		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, convBackComputePipeline);
+		vkCmdPushConstants(cmdbuf2, convBackComputePipelineLayout,
+							VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int), &vertical);
+		// (descriptor set is same)
+		vkCmdDispatch(cmdbuf2, (render_width + 15) / 16, (render_height + 15) / 16, 1);
+
+		vkCmdPipelineBarrier(cmdbuf2,
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+							0, 1, &postConvBarrier, 0, nullptr, 0, nullptr);
+
 		vkCmdBindPipeline(cmdbuf2, VK_PIPELINE_BIND_POINT_COMPUTE, backwardComputePipeline);
         active_sh_degree = std::min(3u, steps / 1000u);
 		BackwardPush backPush{lambda, bgR, bgG, bgB, KVCapacity, (uint32_t)n_tiles_col, (uint32_t)n_tiles_row, active_sh_degree};
@@ -1517,6 +1555,8 @@ void Engine::train(std::vector<Image> &images, std::vector<Camera> &cameras, int
 	vkDestroyPipelineLayout(device, rasterTrainComputePipelineLayout, nullptr);
 	vkDestroyPipeline(device, convComputePipeline, nullptr);
 	vkDestroyPipelineLayout(device, convComputePipelineLayout, nullptr);
+	vkDestroyPipeline(device, convBackComputePipeline, nullptr);
+	vkDestroyPipelineLayout(device, convBackComputePipelineLayout, nullptr);
 	vkDestroyPipeline(device, backwardComputePipeline, nullptr);
 	vkDestroyPipelineLayout(device, backwardComputePipelineLayout, nullptr);
 	vkDestroyPipeline(device, adamComputePipeline, nullptr);

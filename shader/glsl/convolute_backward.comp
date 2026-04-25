@@ -1,0 +1,86 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PushConstants {
+    int isVertical; // 0: Horizontal, 1: Vertical
+} p;
+
+layout(set = 1, binding = 1, rgba8) uniform readonly image2D outImage;      // Rendered (c_pred)
+layout(set = 1, binding = 2, rgba8) uniform readonly image2D gtImage;       // Ground Truth (c_gt)
+layout(set = 1, binding = 4, rgba32f) uniform readonly image2D curSSIMStats; // (mu_x, var_x, cov_xy, T_last)
+layout(set = 1, binding = 5, rg32f) uniform readonly image2D gtSSIMStats;   // (mu_y, var_y)
+
+// Reuse intermediate layouts to prevent Metal layout bounds fault (previously 15, 16)
+layout(set = 1, binding = 6, rgba32f) uniform image2D tempSSIMBack;        // Maps to tempSSIMStats
+layout(set = 1, binding = 7, rgba32f) uniform image2D gradSSIMImage;       // Maps to tempSSIMStats2
+
+const float kernel[11] = {0.001028, 0.007597, 0.035994, 0.109340, 0.212965, 0.266152, 0.212965, 0.109340, 0.035994, 0.007597, 0.001028};
+const vec3 lw = vec3(0.299, 0.587, 0.114);
+
+const float C1 = 0.0001;
+const float C2 = 0.0009;
+
+void main() {
+    ivec2 curr = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    if (curr.x >= size.x || curr.y >= size.y) return;
+
+    if (p.isVertical == 0) {
+        // --- PASS 1: Calculate Analytical Derivatives and Horizontal Blur ---
+        
+        vec4 sum_h = vec4(0.0);
+        for (int i = -5; i <= 5; i++) {
+            ivec2 pos = clamp(curr + ivec2(i, 0), ivec2(0), size - 1);
+            float w = kernel[i + 5];
+
+            // Evaluate V AT the neighbor `pos`!
+            vec3 px_pred = imageLoad(outImage, pos).rgb;
+            vec3 px_gt   = imageLoad(gtImage, pos).rgb;
+            float p_x = dot(px_pred, lw);
+            float p_y = dot(px_gt, lw);
+
+            vec4 p_stats = imageLoad(curSSIMStats, pos);
+            vec2 p_gtStats = imageLoad(gtSSIMStats, pos).xy;
+            float p_mu_x = p_stats.x;
+            float p_var_x = p_stats.y;
+            float p_cov_xy = p_stats.z;
+            float p_mu_y = p_gtStats.x;
+            float p_var_y = p_gtStats.y;
+            
+            float p_A = 2.0 * p_mu_x * p_mu_y + C1;
+            float p_B = 2.0 * p_cov_xy + C2;
+            float p_C_denom = p_mu_x * p_mu_x + p_mu_y * p_mu_y + C1;
+            float p_D = p_var_x + p_var_y + C2;
+            
+            // To prevent divide by zero strictly: (though C1 and C2 already handle this)
+            float safe_C_denom = max(p_C_denom, 1e-6);
+            float safe_D = max(p_D, 1e-6);
+
+            float p_ssim = (p_A * p_B) / (safe_C_denom * safe_D);
+
+            float p_dSSIM_d_muX = (2.0 / (safe_C_denom * safe_D)) * (p_B * p_mu_y - p_ssim * safe_D * p_mu_x);
+            float p_dSSIM_d_varX = - p_ssim / safe_D;
+            float p_dSSIM_d_covXY = (2.0 * p_A) / (safe_C_denom * safe_D);
+
+            float p_V1 = p_dSSIM_d_muX - 2.0 * p_mu_x * p_dSSIM_d_varX - p_mu_y * p_dSSIM_d_covXY;
+            float p_V2 = p_dSSIM_d_varX;
+            float p_V3 = p_dSSIM_d_covXY;
+
+            sum_h += vec4(p_V1, p_V2, p_V3, 0.0) * w;
+        }
+        imageStore(tempSSIMBack, curr, sum_h);
+
+    } else {
+        // --- PASS 2: Vertical Blur ---
+        vec4 e_final = vec4(0.0);
+
+        for (int i = -5; i <= 5; i++) {
+            ivec2 pos = clamp(curr + ivec2(0, i), ivec2(0), size - 1);
+            float w = kernel[i + 5];
+            
+            e_final += imageLoad(tempSSIMBack, pos) * w;
+        }
+
+        imageStore(gradSSIMImage, curr, e_final);
+    }
+}

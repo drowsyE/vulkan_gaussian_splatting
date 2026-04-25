@@ -58,7 +58,8 @@ layout(set = 1, binding = 1, rgba8) uniform readonly image2D outImage;
 layout(set = 1, binding = 2, rgba8) uniform readonly image2D gtImage;
 layout(set = 1, binding = 3, r32ui) uniform readonly uimage2D outContribution;
 layout(set = 1, binding = 4, rgba32f) uniform readonly image2D curSSIMStats;
-layout(set = 1, binding = 5, rg32f) uniform readonly image2D gtSSIMStats; 
+layout(set = 1, binding = 5, rg32f) uniform readonly image2D gtSSIMStats;
+layout(set = 1, binding = 7, rgba32f) uniform readonly image2D gradSSIMImage; 
 layout(set = 1, binding = 8) buffer GradGaussiansBlock { GaussianGrad gradGaussians[]; };
 layout(set = 1, binding = 9) buffer GradPos2dBlock { uint gradPos2d[]; }; // cpp에서 float*로 읽으면 됨
 layout(set = 1, binding = 14) buffer ContributionCountBlock { uint contributionCount[]; };
@@ -162,17 +163,33 @@ void main() {
         // The dataset natively baked Black backgrounds during COLMAP evaluation.
         vec3 c_gt = gt_raw.rgb;
 
+        // Add back luminance for SSIM differential combination
+        float c_pred_lum = dot(c_pred, lw);
+        float c_gt_lum   = dot(c_gt, lw);
+
         float N = cb.viewportSize.x * cb.viewportSize.y;
         float N_c = N * 3.0;
 
         // Pure L1 Gradient (scaled by number of color elements due to .mean() reduction)
         vec3 dL1_dC = sign(c_pred - c_gt) / N_c;
 
-        // Note: SSIM spatial gradient requires full convolution backpropagation through the 11x11 window.
-        // The local analytical approximation previously here caused structural divergence.
-        // We rely 100% on the stable L1 Gradients for proper Gaussian placement.
-        dL_dC = dL1_dC;
-        // --- end of dL/dC --
+        // Load the fully unrolled spatially diffused SSIM gradient parameters compiled from `convolute_backward`
+        vec4 gradSSIM = imageLoad(gradSSIMImage, curr);
+        float C1_back = gradSSIM.x;
+        float C2_back = gradSSIM.y;
+        float C3_back = gradSSIM.z;
+        
+        // Assemble continuous spatial derivative over the channel luminance: 
+        // dL_dC = -lambda/N * (C1 + 2*C_pred*C2 + C_gt*C3)
+        float dSSIM_dLum = (C1_back + 2.0 * c_pred_lum * C2_back + c_gt_lum * C3_back);
+        vec3 dSSIM_dC = (dSSIM_dLum * lw) / N;
+
+        // Hardbound the mathematical limit to completely immunize against positional NaN Page-Faults 
+        // derived from boundary singularities blowing up floating precision.
+        dSSIM_dC = clamp(dSSIM_dC, vec3(-1.0), vec3(1.0));
+
+        // Total Gradient combines Pure L1 structure and Smooth Spatially-Coupled SSIM metrics 
+        dL_dC = (1.0 - lambda) * dL1_dC - lambda * dSSIM_dC;
 
         accum_Tac = vec3(p.bgR, p.bgG, p.bgB) * T_last;
 

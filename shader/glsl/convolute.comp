@@ -11,9 +11,9 @@ layout(set = 1, binding = 2, rgba8) uniform readonly image2D gtImage;       // G
 layout(set = 1, binding = 4, rgba32f) uniform image2D curSSIMStats; // Final (mu_x, var_x, cov_xy, T)
 layout(set = 1, binding = 5, rg32f) uniform writeonly image2D gtSSIMStats;   // Final (mu_y, var_y)
 layout(set = 1, binding = 6, rgba32f) uniform image2D tempSSIMStats;        // Intermediate (E[x], E[x^2], E[xy], E[y])
-layout(set = 1, binding = 7, r32f) uniform image2D tempSSIMStats2;         // Intermediate (E[y^2])
+layout(set = 1, binding = 7, rgba32f) uniform image2D tempSSIMStats2;         // Intermediate (E[y^2])
 
-const float kernel[11] = {0.0020, 0.0086, 0.0270, 0.0606, 0.0960, 0.1126, 0.0960, 0.0606, 0.0270, 0.0086, 0.0020};
+const float kernel[11] = {0.001028, 0.007597, 0.035994, 0.109340, 0.212965, 0.266152, 0.212965, 0.109340, 0.035994, 0.007597, 0.001028};
 const vec3 lw = vec3(0.299, 0.587, 0.114); // for luminance
 
 void main() {
