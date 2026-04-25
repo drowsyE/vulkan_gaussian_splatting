@@ -100,6 +100,7 @@ private:
   glm::vec3 cameraUp{0.0f, -1.0f, 0.0f};
   float yaw{-90.0f};
   float pitch{0.0f};
+  float roll{0.0f};
   std::vector<VkBuffer> cameraBuffers; // need to be resized
   std::vector<VkDeviceMemory> cameraBufferMemory;
   std::vector<void *> cameraBufferMapped;

@@ -2801,46 +2801,59 @@ void Engine::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
 
 void Engine::updateCameraUBO(float deltaTime) {
 	float moveSpeed = 3.0f * deltaTime;
-	float rotSpeed = 60.0f * deltaTime;
+	float rotSpeed = 1.0f * deltaTime; // radians for glm::rotate
 
-	// Use fixed world up for manual control to prevent rolling and slanted movement
-	const glm::vec3 worldUp = glm::vec3(0.0f, -1.0f, 0.0f);
-	glm::vec3 right = glm::normalize(glm::cross(cameraFront, worldUp));
+	// Right vector is cross product of Front and Up
+	glm::vec3 right = glm::normalize(glm::cross(cameraFront, cameraUp));
 
+	// Translation (W/S for Forward/Backward, A/D for Strafe, SPACE/LSHIFT for Vertical relative to local Up)
 	if (glfwGetKey(pWindow, GLFW_KEY_W) == GLFW_PRESS)
 		cameraPos += moveSpeed * cameraFront;
 	if (glfwGetKey(pWindow, GLFW_KEY_S) == GLFW_PRESS)
 		cameraPos -= moveSpeed * cameraFront;
-	if (glfwGetKey(pWindow, GLFW_KEY_SPACE) == GLFW_PRESS)
-		cameraPos += moveSpeed * worldUp;
-	if (glfwGetKey(pWindow, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-		cameraPos -= moveSpeed * worldUp;
 	if (glfwGetKey(pWindow, GLFW_KEY_A) == GLFW_PRESS)
-		cameraPos -= right * moveSpeed;
+		cameraPos -= moveSpeed * right;
 	if (glfwGetKey(pWindow, GLFW_KEY_D) == GLFW_PRESS)
-		cameraPos += right * moveSpeed;
+		cameraPos += moveSpeed * right;
+	if (glfwGetKey(pWindow, GLFW_KEY_SPACE) == GLFW_PRESS)
+		cameraPos += moveSpeed * cameraUp;
+	if (glfwGetKey(pWindow, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+		cameraPos -= moveSpeed * cameraUp;
 
+	// Rotation increments
+	float pitchDelta = 0.0f;
+	float yawDelta = 0.0f;
+	float rollDelta = 0.0f;
+
+	// Arrow keys for Pitch (Up/Down) & Yaw (Left/Right)
 	if (glfwGetKey(pWindow, GLFW_KEY_UP) == GLFW_PRESS)
-		pitch -= rotSpeed;
+		pitchDelta += rotSpeed;
 	if (glfwGetKey(pWindow, GLFW_KEY_DOWN) == GLFW_PRESS)
-		pitch += rotSpeed;
+		pitchDelta -= rotSpeed;
 	if (glfwGetKey(pWindow, GLFW_KEY_LEFT) == GLFW_PRESS)
-		yaw += rotSpeed;
+		yawDelta += rotSpeed;
 	if (glfwGetKey(pWindow, GLFW_KEY_RIGHT) == GLFW_PRESS)
-		yaw -= rotSpeed;
+		yawDelta -= rotSpeed;
 
-	// Normalize angles
-	if (pitch > 89.0f) pitch = 89.0f;
-	if (pitch < -89.0f) pitch = -89.0f;
-	yaw = fmod(yaw, 360.0f);
+	// Q & E keys for Roll
+	if (glfwGetKey(pWindow, GLFW_KEY_Q) == GLFW_PRESS)
+		rollDelta += rotSpeed;
+	if (glfwGetKey(pWindow, GLFW_KEY_E) == GLFW_PRESS)
+		rollDelta -= rotSpeed;
 
-	glm::vec3 front;
-	front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-	front.y = sin(glm::radians(pitch));
-	front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-	cameraFront = glm::normalize(front);
+	// Apply 6-DoF rotations locally using Quaternions
+	if (pitchDelta != 0.0f || yawDelta != 0.0f || rollDelta != 0.0f) {
+		glm::quat qPitch = glm::angleAxis(pitchDelta, right);
+		glm::quat qYaw = glm::angleAxis(yawDelta, cameraUp);
+		glm::quat qRoll = glm::angleAxis(rollDelta, cameraFront);
+		
+		glm::quat qRot = qYaw * qPitch * qRoll; // Apply combined rotations
+		
+		cameraFront = glm::normalize(qRot * cameraFront);
+		cameraUp = glm::normalize(qRot * cameraUp);
+	}
 
-	updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, worldUp);
+	updateCamera(camUBO, cameraPos, cameraPos + cameraFront, render_width, render_height, cameraUp);
 	memcpy(cameraBufferMapped[currentFrame], &camUBO, sizeof(CameraUBO));
 }
 
