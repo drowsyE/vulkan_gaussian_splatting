@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
         fs::remove_all("../sparse");
         fs::remove_all("../dense");
 
-        system("colmap feature_extractor --database_path ../database.db --image_path ../images");
+        system("colmap feature_extractor --ImageReader.camera_model PINHOLE --ImageReader.single_camera 1 --database_path ../database.db --image_path ../images");
         system("colmap exhaustive_matcher --database_path ../database.db");
         std::string sparsePath = "../sparse";
         if (!fs::exists(sparsePath) || !fs::is_directory(sparsePath)) {
