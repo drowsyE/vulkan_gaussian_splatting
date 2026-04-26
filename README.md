@@ -1,6 +1,6 @@
 # Vulkan Gaussian Splatting
 
-A high-performance, Vulkan-based 3D Gaussian Splatting rendering and training engine built from scratch. It features a complete pipeline (forward rendering and backward training loops) and is specifically optimized to perform well on Apple Silicon (M1/M2/M3) using MoltenVK.
+Vulkan-based 3D Gaussian Splatting rendering and training engine built from scratch. It features a complete pipeline (forward rendering and backward training loops) and is specifically optimized to perform well on Apple Silicon (M1/M2/M3) using MoltenVK.
 
 ## Features
 
@@ -12,11 +12,10 @@ A high-performance, Vulkan-based 3D Gaussian Splatting rendering and training en
 
 ## Dependencies
 
-*   **Vulkan SDK** (version 1.3+ recommended)
+*   **Vulkan** (version 1.3+ recommended)
 *   **GLFW3**
 *   **GLM**
-*   **CMake 3.10+**
-*   **C++17 Compiler**
+*   **CMake**
 *   **COLMAP** (required only if generating new sparse point clouds from raw images)
 
 ## Build Instructions
@@ -30,9 +29,8 @@ cd vulkan_gaussian_splatting
 mkdir build
 cd build
 
-# Configure and compile
-cmake ..
-make -j$(sysctl -n hw.logicalcpu)
+# Compile
+make
 ```
 
 ## Usage
@@ -65,7 +63,7 @@ Run the engine with the `-c` flag. It will automatically run COLMAP, extract fea
 **3. Training**
 Run the engine in training mode. It will use the point cloud extracted from `dense/sparse/points3D.bin`.
 ```bash
-./gaussian_splatting -t -i 3000
+./gaussian_splatting -t -i 3500
 ```
 
 **4. Viewing**
@@ -78,7 +76,7 @@ Once trained, launch the engine with no arguments (it intelligently detects the 
 
 - **W, A, S, D**: Move Forward, Left, Backward, Right
 - **Q, E**: Roll Left / Right
-- **Mouse Drag**: Rotate Camera (Yaw, Pitch)
+- **Arrow Keys**: Rotate Camera (Yaw, Pitch)
 
 ## Project Structure
 
@@ -87,9 +85,15 @@ Once trained, launch the engine with no arguments (it intelligently detects the 
 - `lib/`: Third-party dependencies (e.g., `vk_radix_sort`).
 - `walkthrough.md`: Developer notes on engine stabilizations and Vulkan workarounds.
 
+## Results
 
+### Lego (from Nerf Synthetic Dataset)
 <img width="880" height="679" alt="lego1-7 3k" src="https://github.com/user-attachments/assets/37069394-40a6-409c-bd20-e2fdcd98adca" />
 <img width="918" height="627" alt="lego2-7 3k" src="https://github.com/user-attachments/assets/c5ba65cf-1bdc-431b-9af9-3a14e0c9e889" />
 <img width="873" height="563" alt="lego3-7 3k" src="https://github.com/user-attachments/assets/9d46b5b8-322c-410e-a19a-815bde00c391" />
+
+### Drum (from Nerf Synthetic Dataset)
 <img width="888" height="484" alt="drum" src="https://github.com/user-attachments/assets/3bc93c0e-0596-4a91-80f9-1464b5bc04fb" />
+
+### Hotdog (from Nerf Synthetic Dataset)
 <img width="941" height="693" alt="hotdog" src="https://github.com/user-attachments/assets/8e1e2162-3c0f-4465-a8e8-d470e0ff3feb" />

@@ -3064,9 +3064,9 @@ void Engine::updateCameraUBO(float deltaTime) {
 
   // Q & E keys for Roll
   if (glfwGetKey(pWindow, GLFW_KEY_Q) == GLFW_PRESS)
-    rollDelta += rotSpeed;
-  if (glfwGetKey(pWindow, GLFW_KEY_E) == GLFW_PRESS)
     rollDelta -= rotSpeed;
+  if (glfwGetKey(pWindow, GLFW_KEY_E) == GLFW_PRESS)
+    rollDelta += rotSpeed;
 
   // Apply 6-DoF rotations locally using Quaternions
   if (pitchDelta != 0.0f || yawDelta != 0.0f || rollDelta != 0.0f) {
