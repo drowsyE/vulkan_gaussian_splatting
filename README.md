@@ -8,7 +8,6 @@ Vulkan-based 3D Gaussian Splatting rendering and training engine built from scra
 - **Apple Silicon Optimized**: Stable 60 FPS rendering on Apple M1 chips, with tailored GPU synchronization strategies to bypass MoltenVK and TBDR architecture limitations.
 - **6-DoF Navigation**: Interactive first-person 3D camera controls (Yaw, Pitch, Roll) to explore reconstructed scenes in real-time.
 - **COLMAP Integration**: Built-in support to run the entire COLMAP pipeline (feature extraction, mapping, undistortion) to bootstrap scenes from raw images.
-- **Smart Loading**: Automatically detects updated structures from dataset changes and decides whether to train or initialize a viewing session.
 
 ## Dependencies
 
