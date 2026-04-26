@@ -83,7 +83,6 @@ Once trained, launch the engine with no arguments (it intelligently detects the 
 - `src/` & `include/`: Core engine code (`engine.cpp`, `gs_core.cpp`, `cam.cpp`).
 - `shader/`: Vulkan GLSL shaders (`projection.comp`, `raster.comp`, `backward.comp`, `density_control.comp`).
 - `lib/`: Third-party dependencies (e.g., `vk_radix_sort`).
-- `walkthrough.md`: Developer notes on engine stabilizations and Vulkan workarounds.
 
 ## Results
 

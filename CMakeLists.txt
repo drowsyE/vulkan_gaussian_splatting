@@ -33,4 +33,5 @@ target_link_libraries(gaussian_splatting
 
 target_include_directories(gaussian_splatting PRIVATE 
     ${CMAKE_SOURCE_DIR} 
-    ${CMAKE_SOURCE_DIR}/include)
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib)
