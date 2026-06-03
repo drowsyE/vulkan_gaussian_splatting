@@ -21,7 +21,7 @@ Vulkan-based 3D Gaussian Splatting rendering and training engine built from scra
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/vulkan_gaussian_splatting.git
+git clone https://github.com/drowsyE/vulkan_gaussian_splatting.git
 cd vulkan_gaussian_splatting
 
 # Create build directory
@@ -54,7 +54,7 @@ Options:
 Place your source images inside the `images/` directory at the project root.
 
 **2. COLMAP Reconstruction**
-Run the engine with the `-c` flag. It will automatically run COLMAP, extract features, and output the sparse/dense structures required for training.
+Run the engine with the `-c` flag. It will automatically run COLMAP, extract features, and output the sparse structures required for training.
 ```bash
 ./gaussian_splatting -c
 ```
